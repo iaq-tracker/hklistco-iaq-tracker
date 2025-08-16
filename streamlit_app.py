@@ -25,7 +25,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 
 
 # ---------------------------------------------------------------------------- #
@@ -144,10 +143,13 @@ def scrape(
     Scrape HKEx website and extract key filings.
     """
     # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    service = Service(ChromeDriverManager().install())
+    service = Service("/usr/lib/chromium-browser/chromedriver")
     options = webdriver.ChromeOptions()
     options.add_argument("--window-size=1920,1080")  # set window size
-    options.add_argument("--headless")  # headless mode
+    options.add_argument("--headless=new")  # headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gcm")  # disable GCM registration
     options.add_argument("--disable-notifications")  # disable push notification
     options.add_experimental_option(
