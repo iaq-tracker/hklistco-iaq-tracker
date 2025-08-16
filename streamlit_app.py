@@ -978,7 +978,7 @@ st.write(
     """
     View a summary of the stock codes you're tracking, including:
     - the last update dates for ESG filings from HKEx
-    - the IR contacts
+    - the last update dates for IR contacts
     """
 )
 st.info(
