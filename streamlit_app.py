@@ -20,11 +20,14 @@ from sqlalchemy import text as sql_text
 import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 
 # ---------------------------------------------------------------------------- #
@@ -143,10 +146,10 @@ def scrape(
     Scrape HKEx website and extract key filings.
     """
     # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    service = Service("/usr/lib/chromium-browser/chromedriver")
-    options = webdriver.ChromeOptions()
+    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    options = Options()
     options.add_argument("--window-size=1920,1080")  # set window size
-    options.add_argument("--headless=new")  # headless mode
+    options.add_argument("--headless")  # headless mode
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -886,7 +889,10 @@ def update_ir_contacts_df(
             )
         except sqlalchemy.exc.IntegrityError as exc:
             if 'null value in column "response"' in str(exc):
-                msg = f"Error found while using Gemini API to extract contacts for {code}. Might have hit rate limit. Please retry later."
+                msg = (
+                    f"Error found while using Gemini API to extract contacts for {code}. "
+                    "Might have hit rate limit. Please retry later."
+                )
                 st.write(msg)
             else:
                 st.write(exc)
@@ -1031,7 +1037,9 @@ st.subheader("ESG Filings")
 st.write(
     """
     View the latest ESG filings for your tracked HKEx stock codes, scraped from the HKEx website.
-    Each filing includes the release date, title, and URL for easy access. You can edit, add or remove filings manually using the "Edit" toggle. Once done editing, click the "Done" button to commit the changes.
+    Each filing includes the release date, title, and URL for easy access.
+    You can edit, add or remove filings manually using the "Edit" toggle.
+    Once done editing, click the "Done" button to commit the changes.
     Use the form below to fetch new filings.
     """
 )
