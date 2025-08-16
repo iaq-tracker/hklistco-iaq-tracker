@@ -985,10 +985,13 @@ st.info(
     """
     ✍️ Tips:
     - Sort by column when "Edit" is toggled off.
-    - Use the "Edit" toggle to add, remove, or modify stock code or company name.
-    Make sure any newly added stock code is 5 digits (e.g. 00001).
-    - Press "Enter" or "Tab" after every edit. Once you are done with editing, click the
-    "Done" button to commit the changes.
+    - Enable an edit mode by toggling "Edit" to make changes to stock code or company name.
+    - To add a row, click the empty row at the bottom of the table and enter the data 
+    for each column. Make sure any newly added stock code is 5 digits (e.g. 00001).
+    - To remove a row, click the checkbox in the first column of that row and press "Delete".
+    - To modify a row, double-click the cell and type the new value.
+    - Press "Enter" or "Tab", or click outside the cell to confirm after every edit. 
+    - Once you are done with editing, click the "Done" button to commit all of the changes.
     """,
 )
 
