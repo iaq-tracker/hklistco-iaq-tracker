@@ -898,7 +898,7 @@ def update_ir_contacts_df(
                 st.write(exc)
         else:
             st.success(
-                f"IR contacts updated for stock codes that are last fetched {weeks} weeks ago!"
+                f"IR contacts updated for {code}!"
             )
 
     # Reset session state
@@ -976,9 +976,9 @@ st.divider(width="stretch")
 st.subheader("Summary of Latest Filings and Contact Updates")
 st.write(
     """
-    View a summary of the stock codes you're tracking, including:
-    - the last update dates for ESG filings from HKEx
-    - the last update dates for IR contacts
+    View a summary of the stock codes you're tracking, including the last update dates for:
+    - ESG filings from HKEx
+    - IR contacts
     """
 )
 st.info(
