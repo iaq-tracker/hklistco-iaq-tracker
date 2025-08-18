@@ -27,7 +27,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 
 # ---------------------------------------------------------------------------- #
@@ -63,18 +62,31 @@ def get_stock_codes_tbu(
         msg = "Either update_filings or update_contacts must be True"
         raise ValueError(msg)
 
-    # Create SQL query
-    field = "last_updated_filings_at" if update_filings else "last_updated_contacts_at"
-    query = f"SELECT stock_code FROM control WHERE {field} IS NULL"
-    params = {}
-    if update_before is not None:
-        query += f" OR {field} <= :update_before"
-        params = {"update_before": update_before}
+    # Load control_df if it is not loaded in session state
+    if "control_df" not in st.session_state:
+        load_control_df()
 
-    # Query database
-    db_conn = st.connection("neon", type="sql")
-    df = db_conn.query(query, params=params)
-    return df["stock_code"].dropna().tolist()
+    # Determine the field to filter
+    field = "last_updated_filings_at" if update_filings else "last_updated_contacts_at"
+
+    # Ensure the datetime column is timezone-aware (UTC)
+    if st.session_state.control_df[field].dtype == "datetime64[ns]":
+        st.session_state.control_df[field] = st.session_state.control_df[
+            field
+        ].dt.tz_localize("UTC")
+
+    # Create condition to select rows where field is NULL
+    condition = st.session_state.control_df[field].isna()
+
+    # Add condition to include rows where field is before update_before
+    if update_before:
+        # Convert to the timezone-aware pandas Timestamp
+        update_before = pd.to_datetime(update_before, utc=True)
+        condition |= st.session_state.control_df[field] <= update_before
+
+    # Query dataframe
+    result_df = st.session_state.control_df[condition][["stock_code"]]
+    return result_df["stock_code"].dropna().tolist()
 
 
 # -------------------------------- ESG Filings ------------------------------- #
@@ -84,17 +96,25 @@ def get_last_updated_at(
     """
     Get the timestamp of last updated at for a stock code.
     """
-    db_conn = st.connection("neon", type="sql")
-    df = db_conn.query(
-        "SELECT last_updated_filings_at FROM control WHERE stock_code = :stock_code",
-        params={"stock_code": stock_code},
+    # Load control_df if it is not loaded in session state
+    if "control_df" not in st.session_state:
+        load_control_df()
+
+    # Filter control_df for the given stock_code and select last_updated_filings_at
+    condition = st.session_state.control_df["stock_code"] == stock_code
+    result_df = st.session_state.control_df[condition][["last_updated_filings_at"]]
+
+    # Extract the first value if the DataFrame is not empty, else return None
+    result = (
+        result_df["last_updated_filings_at"].iloc[0] if not result_df.empty else None
     )
-    result = df["last_updated_filings_at"].iloc[0] if not df.empty else None
 
     # convert to local timezone if specified
     if in_local_tz and result:
-        result_utc = pytz.timezone("UTC").localize(result)
-        result = result_utc.astimezone(pytz.timezone("Asia/Hong_Kong"))
+        # Localize the naive timestamp to UTC and then convert to the target timezone
+        result = result.tz_localize("UTC").tz_convert("Asia/Hong_Kong")
+        # Convert the timezone-aware pandas Timestamp to a timezone-aware python datetime object
+        result = result.to_pydatetime()
     return result
 
 
@@ -146,7 +166,8 @@ def scrape(
     Scrape HKEx website and extract key filings.
     """
     # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    # service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    service = Service(ChromeDriverManager().install())
     options = Options()
     options.add_argument("--window-size=1920,1080")  # set window size
     options.add_argument("--headless")  # headless mode
@@ -344,17 +365,18 @@ def get_llm_client() -> genai.Client:
     """
     Set up Gemini API client
     """
-    # Count number of llm logs in db
-    db_conn = st.connection("neon", type="sql")
-    df = db_conn.query("SELECT COUNT(*) FROM llm_logs")
-    llm_logs_count = df["count"][0]
+    # Set up counter in session state
+    if "api_key_counter" not in st.session_state:
+        st.session_state.api_key_counter = 0
 
     # Count number of api keys available
     api_keys = st.secrets.GEMINI_API_KEYS
     api_keys_count = len(api_keys)
 
     # Rotate and return api key
-    return genai.Client(api_key=api_keys[llm_logs_count % api_keys_count])
+    return genai.Client(
+        api_key=api_keys[st.session_state.api_key_counter % api_keys_count]
+    )
 
 
 def get_citations(response: types.GenerateContentResponse) -> list[str]:
@@ -412,13 +434,14 @@ def search_contacts(
     to simultaneously use a grounding tool and enforce a structured JSON output.
     See: https://github.com/googleapis/python-genai/issues/665
     """
-    # Get company name
-    db_conn = st.connection("neon", type="sql")
-    df = db_conn.query(
-        "SELECT name FROM control WHERE stock_code = :stock_code",
-        params={"stock_code": stock_code},
-    )
-    company_name = df["name"].iloc[0] if not df.empty else ""
+    # Load control_df if it is not loaded in session state
+    if "control_df" not in st.session_state:
+        load_control_df()
+
+    # Filter control_df for the given stock_code and get name
+    condition = st.session_state.control_df["stock_code"] == stock_code
+    result_df = st.session_state.control_df[condition][["name"]]
+    company_name = result_df["name"].iloc[0] if not result_df.empty else ""
 
     # Create prompt
     model = "gemini-2.5-pro"
@@ -462,6 +485,10 @@ def search_contacts(
                 },
             )
             session.commit()
+
+    # Update api key counter
+    st.session_state.api_key_counter += 1
+
     return embed_citations(response)
 
 
@@ -547,6 +574,10 @@ def format_contacts(
                 },
             )
             session.commit()
+
+    # Update api key counter
+    st.session_state.api_key_counter += 1
+
     return contacts
 
 
@@ -897,9 +928,7 @@ def update_ir_contacts_df(
             else:
                 st.write(exc)
         else:
-            st.success(
-                f"IR contacts updated for {code}!"
-            )
+            st.success(f"IR contacts updated for {code}!")
 
     # Reset session state
     del st.session_state.ir_contacts_df
@@ -986,11 +1015,11 @@ st.info(
     ✍️ Tips:
     - Sort by column when "Edit" is toggled off.
     - Enable an edit mode by toggling "Edit" to make changes to stock code or company name.
-    - To add a row, click the empty row at the bottom of the table and enter the data 
+    - To add a row, click the empty row at the bottom of the table and enter the data
     for each column. Make sure any newly added stock code is 5 digits (e.g. 00001).
     - To remove a row, click the checkbox in the first column of that row and press "Delete".
     - To modify a row, double-click the cell and type the new value.
-    - Press "Enter" or "Tab", or click outside the cell to confirm after every edit. 
+    - Press "Enter" or "Tab", or click outside the cell to confirm after every edit.
     - Once you are done with editing, click the "Done" button to commit all of the changes.
     """,
 )
@@ -1041,8 +1070,6 @@ st.write(
     """
     View the latest ESG filings for your tracked HKEx stock codes, scraped from the HKEx website.
     Each filing includes the release date, title, and URL for easy access.
-    You can edit, add or remove filings manually using the "Edit" toggle.
-    Once done editing, click the "Done" button to commit the changes.
     Use the form below to fetch new filings.
     """
 )
@@ -1117,6 +1144,15 @@ st.write(
     been updated recently, AI will re-scan and extract any new or changed info.
     """
 )
+st.info(
+    """
+    ✍️ Notes:
+    Updating IR contacts requires the use of Gemini 2.5 Pro. Since the model has
+    a lower rate limit, there may be times that the update will fail mid process.
+    Please retry the update after a few minutes.
+    """,
+)
+
 
 # init ir_contacts dataframe and edit_ir_contacts
 if "ir_contacts_df" not in st.session_state:
