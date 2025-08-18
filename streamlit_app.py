@@ -374,9 +374,14 @@ def get_llm_client() -> genai.Client:
     api_keys_count = len(api_keys)
 
     # Rotate and return api key
-    return genai.Client(
+    client = genai.Client(
         api_key=api_keys[st.session_state.api_key_counter % api_keys_count]
     )
+
+    # Update api key counter
+    st.session_state.api_key_counter += 1
+
+    return client
 
 
 def get_citations(response: types.GenerateContentResponse) -> list[str]:
@@ -485,10 +490,6 @@ def search_contacts(
                 },
             )
             session.commit()
-
-    # Update api key counter
-    st.session_state.api_key_counter += 1
-
     return embed_citations(response)
 
 
@@ -573,11 +574,21 @@ def format_contacts(
                     "stock_code": stock_code,
                 },
             )
+            # Add to llm logs table
+            citations = get_citations(response)
+            session.execute(
+                sql_text("""
+                INSERT INTO llm_logs (stock_code, prompt, response, citations)
+                VALUES (:stock_code, :prompt, :response, :citations)
+                """),
+                {
+                    "stock_code": stock_code,
+                    "prompt": prompt,
+                    "response": response.text,
+                    "citations": "\n".join(citations) if citations else "None",
+                },
+            )
             session.commit()
-
-    # Update api key counter
-    st.session_state.api_key_counter += 1
-
     return contacts
 
 
