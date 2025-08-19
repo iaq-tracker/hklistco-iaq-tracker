@@ -28,6 +28,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 
 # ---------------------------------------------------------------------------- #
@@ -247,8 +248,7 @@ def scrape(
     Scrape HKEx website and extract key filings.
     """
     # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    # service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    service = Service(ChromeDriverManager().install())
+    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
     options = Options()
     options.add_argument("--window-size=1920,1080")  # set window size
     options.add_argument("--headless")  # headless mode
@@ -403,7 +403,7 @@ def scrape(
     # d) save key data to esg_filings tab of master excel
     if save_to_db:
         db_conn = st.connection("neon", type="sql")
-        for data in data_lst:
+        for d in data_lst:
             with db_conn.session as session:
                 session.execute(
                     sql_text("""
@@ -413,9 +413,9 @@ def scrape(
                     """),
                     {
                         "stock_code": stock_code,
-                        "release_time": data.get("release_time"),
-                        "title": data.get("title"),
-                        "url": data.get("url"),
+                        "release_time": d.get("release_time"),
+                        "title": d.get("title"),
+                        "url": d.get("url"),
                     },
                 )
                 session.commit()
@@ -450,6 +450,10 @@ def grade_iaq(
 ) -> str:
     """
     Grade IAQ discloures of listed company in its ESG reports by LLM
+    NOTE: As of 20 Aug 2025, url context can only process up to 20 URLs
+    per request. And the maximum size for content retrieved from a
+    single URL is 34MB
+    See: https://ai.google.dev/gemini-api/docs/url-context
     """
     # Load relevant dataframes if not loaded in session state
     if "control_df" not in st.session_state:
@@ -462,11 +466,13 @@ def grade_iaq(
     result_df = st.session_state.control_df[condition][["name"]]
     company_name = result_df["name"].iloc[0] if not result_df.empty else ""
 
-    # Get filings from esg_filings df
+    # Get most recent 20 filings from esg_filings df
     condition = st.session_state.esg_filings_df["stock_code"] == stock_code
-    filings_df = st.session_state.esg_filings_df[condition][
-        ["title", "url", "release_time"]
-    ].sort_values(by="release_time")
+    filings_df = (
+        st.session_state.esg_filings_df[condition][["title", "url", "release_time"]]
+        .sort_values(by="release_time", ascending=False)
+        .head(20)
+    )
 
     filings = ""
     if not filings_df.empty:
@@ -828,14 +834,14 @@ def edit_control_df():
             # Construct sql query
             set_clause = ", ".join(f"{key} = :{key}" for key in changes.keys())
             params = dict(changes.items())
-            params["stock_code"] = code
+            params["code"] = code
 
             with db_conn.session as session:
                 session.execute(
                     sql_text(f"""
                     UPDATE control
                     SET {set_clause}
-                    WHERE id = :id
+                    WHERE stock_code = :code
                     """),
                     params,
                 )
@@ -903,13 +909,11 @@ def edit_esg_filings_df():
     Save changes to esg_filings table in database
     """
     db_conn = st.connection("neon", type="sql")
-    esg_filings_df = st.session_state.esg_filings_df
-    esg_filings_key = st.session_state.esg_filings_key
 
     # Update database based on edited_rows
-    if edited_rows := esg_filings_key["edited_rows"]:
+    if edited_rows := st.session_state.esg_filings_key["edited_rows"]:
         for row_idx, changes in edited_rows.items():
-            pid = int(esg_filings_df.iloc[row_idx]["id"])
+            pid = int(st.session_state.esg_filings_df.iloc[row_idx]["id"])
             # Skip if no change other than change to stock_code
             changes.pop("stock_code", None)
             if not changes:
@@ -931,7 +935,7 @@ def edit_esg_filings_df():
                 session.commit()
 
     # Add new rows to database based on added_rows
-    if added_rows := esg_filings_key["added_rows"]:
+    if added_rows := st.session_state.esg_filings_key["added_rows"]:
         for row in added_rows:
             # Define allowed fields for insertion
             allowed_fields = ["stock_code", "release_time", "title", "url"]
@@ -953,9 +957,9 @@ def edit_esg_filings_df():
                 session.commit()
 
     # Remove deleted rows from esg_filings table
-    if deleted_rows := esg_filings_key["deleted_rows"]:
+    if deleted_rows := st.session_state.esg_filings_key["deleted_rows"]:
         for row_idx in deleted_rows:
-            pid = int(esg_filings_df.iloc[row_idx]["id"])
+            pid = int(st.session_state.esg_filings_df.iloc[row_idx]["id"])
             with db_conn.session as session:
                 session.execute(
                     sql_text("DELETE FROM esg_filings WHERE id = :id"),
@@ -999,7 +1003,8 @@ def update_esg_filings_df(
     del st.session_state.control_df
 
     st.success(
-        f"ESG filings successfully updated for stock codes last fetched more than {weeks} weeks ago!"
+        "ESG filings successfully updated for stock codes "
+        f"last fetched more than {weeks} weeks ago!"
     )
 
 
@@ -1050,17 +1055,10 @@ def edit_iaq_grading(
     Save changes to control and/or iaq_gradings table
     """
     # Fetch values from session state using keys
-    grade_key = f"grade_{stock_code}"
-    overview_key = f"overview_{stock_code}"
-    justification_key = f"justification_{stock_code}"
-    extracts_key = f"extracts_{stock_code}"
-
-    grade = st.session_state.get(grade_key, "")
-    overview = st.session_state.get(overview_key, "")
-    justification = st.session_state.get(justification_key, "")
-    extracts = st.session_state.get(extracts_key, "")
-
-    print(grade)
+    grade = st.session_state.get(f"grade_{stock_code}", "")
+    overview = st.session_state.get(f"overview_{stock_code}", "")
+    justification = st.session_state.get(f"justification_{stock_code}", "")
+    extracts = st.session_state.get(f"extracts_{stock_code}", "")
 
     db_conn = st.connection("neon", type="sql")
     with db_conn.session as session:
@@ -1072,7 +1070,6 @@ def edit_iaq_grading(
                 ),
                 {"grade": grade, "code": stock_code},
             )
-            print("HIT control db")
             # Delete control_df from session state to force reloading
             del st.session_state.control_df
             # Reload iaq_grading from session state
@@ -1097,7 +1094,6 @@ def edit_iaq_grading(
                     "code": stock_code,
                 },
             )
-            print("HIT iaq_gradings db")
             # Reload iaq_grading from session state
             load_iaq_grading(stock_code)
         session.commit()
@@ -1126,7 +1122,8 @@ def update_iaq_grading(
     except sqlalchemy.exc.IntegrityError as exc:
         if 'null value in column "response"' in str(exc):
             msg = (
-                f"Error encountered while using Gemini API to grade IAQ disclosures for {stock_code}. "
+                "Error encountered while using Gemini API to grade IAQ "
+                f"disclosures for {stock_code}. "
                 "This may be due to rate limits—please try again later."
             )
             st.write(msg)
@@ -1159,13 +1156,11 @@ def edit_ir_contacts_df():
     Save changes to ir_contacts table in database
     """
     db_conn = st.connection("neon", type="sql")
-    ir_contacts_df = st.session_state.ir_contacts_df
-    ir_contacts_key = st.session_state.ir_contacts_key
 
     # Update database based on edited_rows
-    if edited_rows := ir_contacts_key["edited_rows"]:
+    if edited_rows := st.session_state.ir_contacts_key["edited_rows"]:
         for row_idx, changes in edited_rows.items():
-            pid = int(ir_contacts_df.iloc[row_idx]["id"])
+            pid = int(st.session_state.ir_contacts_df.iloc[row_idx]["id"])
             # Skip if no change other than change to stock_code
             changes.pop("stock_code", None)
             if not changes:
@@ -1187,7 +1182,7 @@ def edit_ir_contacts_df():
                 session.commit()
 
     # Add new rows to database based on added_rows
-    if added_rows := ir_contacts_key["added_rows"]:
+    if added_rows := st.session_state.ir_contacts_key["added_rows"]:
         for row in added_rows:
             # Define allowed fields for insertion
             allowed_fields = [
@@ -1216,9 +1211,9 @@ def edit_ir_contacts_df():
                 session.commit()
 
     # Remove deleted rows from ir_contacts table
-    if deleted_rows := ir_contacts_key["deleted_rows"]:
+    if deleted_rows := st.session_state.ir_contacts_key["deleted_rows"]:
         for row_idx in deleted_rows:
-            pid = int(ir_contacts_df.iloc[row_idx]["id"])
+            pid = int(st.session_state.ir_contacts_df.iloc[row_idx]["id"])
             with db_conn.session as session:
                 session.execute(
                     sql_text("DELETE FROM ir_contacts WHERE id = :id"),
@@ -1274,9 +1269,9 @@ def update_ir_contacts_df(
                     f"Error found while using Gemini API to extract contacts for {code}. "
                     "Might have hit rate limit. Please retry later."
                 )
-                st.write(msg)
+                st.warning(msg, icon="⚠️")
             else:
-                st.write(exc)
+                st.warning(exc, icon="⚠️")
         else:
             st.success(f"IR contacts updated for {code}!")
 
@@ -1337,11 +1332,12 @@ def write_to_excel():
 #                                     Main                                     #
 # ---------------------------------------------------------------------------- #
 # Show app title and description
-st.set_page_config(page_title="ListCo IAQ Tracker", page_icon="🌳")
-st.title("🌳 Hong Kong ListCo IAQ Tracker")
+st.set_page_config(page_title="HK ListCo IAQ Tracker", page_icon=":material/aq_indoor:")
+st.title(":material/aq_indoor: Hong Kong ListCo IAQ Tracker")
 st.write(
     """
-    Track Indoor Air Quality (IAQ) disclosures in ESG reports for Hong Kong Stock Exchange (HKEx)-listed companies.
+    Track Indoor Air Quality (IAQ) disclosures in ESG reports for Hong Kong
+    Stock Exchange (HKEx)-listed companies.
     Key features include:
     - Maintain a wishlist of stock codes for monitoring.
     - Automatically fetch and update the latest ESG filings from HKEx.
@@ -1364,7 +1360,7 @@ st.write(
 )
 st.info(
     """
-    ⭐ Editing Tips:
+    ⭐ Tips:
     - Toggle "Edit" off to sort columns.
     - Toggle "Edit" on to modify stock codes, company names, or IAQ grades.
     - Add rows by filling the blank row at the bottom (stock codes must be 5 digits, e.g., 00001).
@@ -1474,7 +1470,10 @@ else:
 
 with st.form("esg_filings_form"):
     update_threshold_weeks = st.number_input(
-        label="Refresh filings older than this many weeks (e.g., enter 12 for updates older than 3 months):",
+        label=(
+            "Refresh filings older than this many weeks "
+            "(e.g., enter 12 for updates older than 3 months):"
+        ),
         min_value=0,
         value=12,
     )
@@ -1491,7 +1490,8 @@ st.divider()
 # ------------------------------- IAQ Grading ------------------------------- #
 st.subheader("IAQ Grading Report")
 st.write(
-    "View and edit AI-generated grading reports evaluating IAQ disclosures in ESG filings. Select a stock code below to get started."
+    "View and edit AI-generated grading reports evaluating IAQ disclosures"
+    "in ESG filings. Select a stock code below to get started."
 )
 
 
@@ -1511,26 +1511,29 @@ if "iaq_grading" in st.session_state:
         # Compile data
         data = st.session_state.iaq_grading.iloc[0]
         # Define keys based on selected stock code
-        grade_key = f"grade_{selected_stock_code}"
-        overview_key = f"overview_{selected_stock_code}"
-        justification_key = f"justification_{selected_stock_code}"
-        extracts_key = f"extracts_{selected_stock_code}"
         with st.form("iaq_grading_form"):
-            st.text_input("IAQ Grade", value=data.get("iaq_grade", ""), key=grade_key)
+            st.text_input(
+                "IAQ Grade",
+                value=data.get("iaq_grade", ""),
+                key=f"grade_{selected_stock_code}",
+            )
             st.text_area(
                 "Company Overview",
                 value=data.get("overview", ""),
-                height=100,
-                key=overview_key,
+                height=150,
+                key=f"overview_{selected_stock_code}",
             )
             st.text_area(
                 "Justification",
                 value=data.get("justification", ""),
-                height=150,
-                key=justification_key,
+                height=200,
+                key=f"justification_{selected_stock_code}",
             )
             st.text_area(
-                "Extracts", value=data.get("extracts", ""), height=400, key=extracts_key
+                "Extracts",
+                value=data.get("extracts", ""),
+                height=400,
+                key=f"extracts_{selected_stock_code}",
             )
             st.form_submit_button(
                 "Save Changes",
@@ -1546,7 +1549,7 @@ if "iaq_grading" in st.session_state:
     # Generate/Update IAQ Grading
     st.info(
         """
-        ⭐ Tip: The AI uses only the ESG filings stored in the table above.
+        ⭐ Tips: The AI uses only the 20 most recent ESG filings stored in the table above.
         If filings seem outdated, refresh them first before generating a report.
         """,
     )
@@ -1568,13 +1571,14 @@ st.divider()
 st.subheader("Investor Relations Contacts")
 st.write(
     """
-    View AI-extracted IR contact details for your tracked stock codes, sourced from official company websites and filings.
+    View AI-extracted IR contact details for your tracked stock codes,
+    sourced from official company websites and filings.
     Refresh contacts using the form below to capture any updates.
     """
 )
 st.info(
     """
-    ⭐ Note: This feature uses the Gemini 2.5 Pro model, which has rate limits.
+    ⭐ Tips: This feature uses the Gemini 2.5 Pro model, which has rate limits.
     If an update fails, wait a few minutes and retry.
     """,
 )
@@ -1621,7 +1625,10 @@ else:
 
 with st.form("ir_contacts_form"):
     update_threshold_weeks = st.number_input(
-        label="Refresh contacts older than this many weeks (e.g., enter 12 for updates older than 3 months):",
+        label=(
+            "Refresh contacts older than this many weeks "
+            "(e.g., enter 12 for updates older than 3 months):"
+        ),
         min_value=0,
         value=12,
     )
