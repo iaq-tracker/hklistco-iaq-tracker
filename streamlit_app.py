@@ -533,7 +533,7 @@ def grade_iaq(
                 },
             )
             session.commit()
-    return embed_citations(response)
+    return response.text
 
 
 def format_grading(
@@ -1337,8 +1337,8 @@ def write_to_excel():
 #                                     Main                                     #
 # ---------------------------------------------------------------------------- #
 # Show app title and description
-st.set_page_config(page_title="HK ListCo IAQ Tracker", page_icon=":material/aq_indoor:")
-st.title(":material/aq_indoor: Hong Kong ListCo IAQ Tracker")
+st.set_page_config(page_title="ListCo IAQ Tracker", page_icon="🌳")
+st.title("🌳 Hong Kong ListCo IAQ Tracker")
 st.write(
     """
     Track Indoor Air Quality (IAQ) disclosures in ESG reports for Hong Kong Stock Exchange (HKEx)-listed companies.
