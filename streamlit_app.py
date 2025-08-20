@@ -481,7 +481,6 @@ def grade_iaq(
         )
 
     # Create prompt
-    model = "gemini-2.5-flash"
     prompt = f"""You are an expert ESG analyst specializing in evaluating corporate disclosures for Hong Kong listed companies under the Hong Kong Stock Exchange (HKEX) ESG reporting guidelines.
     Your task is to evaluate the ESG disclosures of the company {company_name} with a stock ticker of '{stock_code}' specifically on the topic of indoor air quality (IAQ). This includes any mentions of IAQ management, monitoring, policies, risks, mitigation strategies, emissions (e.g., VOCs, PM2.5, CO2 levels), ventilation systems, employee health impacts, building certifications (e.g., BEAM Plus, LEED), or related initiatives in its operation.
     You are provided with below list of URLs to all of the company's ESG filings published onHKEx. Read content from these URLs, then extract and summarize only the sections relevant to indoor air quality.
@@ -512,7 +511,7 @@ def grade_iaq(
 
     # Send prompt
     response = client.models.generate_content(
-        model=model,
+        model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[
@@ -552,7 +551,6 @@ def format_grading(
     """
     Format text response to specified JSON schema.
     """
-    model = "gemini-2.5-flash-lite"
     prompt = f"""You are an expert data extraction tool. Your task is to analyze the text provided below and extract key details from the ESG grading report prepared by an expert ESG analyst.
 
     From the text, identify the following for each report found:
@@ -571,7 +569,7 @@ def format_grading(
     **Expected JSON Output:**
     """
     response = client.models.generate_content(
-        model=model,
+        model="gemini-2.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.0,
@@ -655,7 +653,6 @@ def search_contacts(
     company_name = result_df["name"].iloc[0] if not result_df.empty else ""
 
     # Create prompt
-    model = "gemini-2.5-pro"
     prompt = (
         "Imagine you are an ESG reporting consultant trying to reach "
         "out to the Investor Relations department of the Hong Kong listed "
@@ -672,13 +669,25 @@ def search_contacts(
     # Send prompt
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     response = client.models.generate_content(
-        model=model,
+        model="gemini-2.5-pro",
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[grounding_tool],
             temperature=0.0,
         ),
     )
+
+    # Retry with gemini-2.5-flash if response is empty
+    if not response.text:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[grounding_tool],
+                temperature=0.0,
+            ),
+        )
+
     if save_to_db:
         db_conn = st.connection("neon", type="sql")
         citations = get_citations(response)
@@ -709,7 +718,6 @@ def format_contacts(
     """
     Format key data from grounded information to specified JSON schema.
     """
-    model = "gemini-2.5-flash-lite"
     prompt = f"""You are an expert data extraction tool. Your task is to analyze the text provided below and extract all available contact details for the Investor Relations department.
 
     From the text, identify the following for each contact found:
@@ -731,7 +739,7 @@ def format_contacts(
     **Expected JSON Output:**
     """
     response = client.models.generate_content(
-        model=model,
+        model="gemini-2.5-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.0,
