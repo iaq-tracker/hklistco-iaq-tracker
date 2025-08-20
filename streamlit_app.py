@@ -658,7 +658,7 @@ def search_contacts(
         "out to the Investor Relations department of the Hong Kong listed "
         f"company {company_name} with a stock ticker of '{stock_code}' "
         "ideally via email. Find all official, up-to-date, available "
-        "contact details, including A)s general departmental contact "
+        "contact details, including A) general departmental contact "
         "information (e.g. ir@aia.com); and B) details for specific "
         "individuals (e.g. title, name, email, telephone numbers). "
         "Ignore Company Share Registrar. Only reference official sources "
@@ -751,7 +751,7 @@ def format_contacts(
                     sql_text("""
                     INSERT INTO ir_contacts (stock_code, email, name, tel, title, citations)
                     VALUES (:stock_code, :email, :name, :tel, :title, :citations)
-                    ON CONFLICT (email) DO NOTHING
+                    ON CONFLICT ON CONSTRAINT ir_contacts_stock_email_key DO NOTHING
                     """),
                     {
                         "stock_code": stock_code,
@@ -1201,7 +1201,7 @@ def edit_ir_contacts_df():
                     sql_text(f"""
                     INSERT INTO ir_contacts ({fields})
                     VALUES ({placeholders})
-                    ON CONFLICT (email) DO NOTHING
+                    ON CONFLICT ON CONSTRAINT ir_contacts_stock_email_key DO NOTHING
                     """),
                     params,
                 )
@@ -1609,7 +1609,7 @@ else:
             ),
             "email": st.column_config.TextColumn(
                 validate=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
-                required=True,
+                required=False,
             ),
         },
         disabled=[
