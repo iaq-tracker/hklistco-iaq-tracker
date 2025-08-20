@@ -677,17 +677,6 @@ def search_contacts(
         ),
     )
 
-    # Retry with gemini-2.5-flash if response is empty
-    if not response.text:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=0.0,
-            ),
-        )
-
     if save_to_db:
         db_conn = st.connection("neon", type="sql")
         citations = get_citations(response)
