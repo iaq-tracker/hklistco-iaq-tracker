@@ -849,16 +849,18 @@ def edit_control_df():
         for row in added_rows:
             code = row.get("stock_code")
             name = row.get("name")
+            grade = row.get("iaq_grade")
             with db_conn.session as session:
                 session.execute(
                     sql_text("""
-                    INSERT INTO control (stock_code, name)
-                    VALUES (:code, :name)
+                    INSERT INTO control (stock_code, name, iaq_grade)
+                    VALUES (:code, :name, :grade)
                     ON CONFLICT (stock_code) DO NOTHING
                     """),
                     {
                         "code": code,
                         "name": name,
+                        "grade": grade,
                     },
                 )
                 session.commit()
@@ -1398,9 +1400,6 @@ else:
             ),
         },
         disabled=[
-            "last_updated_filings_at",
-            "last_updated_grade_at",
-            "last_updated_contacts_at",
             "created_at",
         ],
         key="control_key",
