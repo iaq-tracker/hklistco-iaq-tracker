@@ -1,5 +1,5 @@
 """
-App to be deployed on Streamlit Cloud
+App deployed on Streamlit Community Cloud
 """
 
 from datetime import datetime
@@ -8,6 +8,7 @@ import re
 import time
 from typing import List
 from typing import Dict
+from typing import Union
 from io import BytesIO
 import random
 
@@ -29,6 +30,9 @@ from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.core.os_manager import ChromeType
+
+
+db_conn = st.connection("supabase", type="sql")
 
 
 # ---------------------------------------------------------------------------- #
@@ -372,7 +376,7 @@ def scrape(
     )
 
     # loop through each row
-    data_lst: List[Dict[datetime | str]] = []
+    data_lst: List[Dict[str, Union[datetime, str]]] = []
     company_name = None
     for row in result_rows:
         cells = row.find_elements(By.TAG_NAME, "td")
@@ -402,7 +406,6 @@ def scrape(
 
     # d) save key data to esg_filings tab of master excel
     if save_to_db:
-        db_conn = st.connection("neon", type="sql")
         for d in data_lst:
             with db_conn.session as session:
                 session.execute(
@@ -522,7 +525,6 @@ def grade_iaq(
     )
 
     if save_to_db:
-        db_conn = st.connection("neon", type="sql")
         citations = get_citations(response)
         with db_conn.session as session:
             session.execute(
@@ -580,7 +582,6 @@ def format_grading(
     grade: Grade = response.parsed
 
     if save_to_db and grade:
-        db_conn = st.connection("neon", type="sql")
         with db_conn.session as session:
             # Add to iaq_gradings table
             session.execute(
@@ -678,7 +679,6 @@ def search_contacts(
     )
 
     if save_to_db:
-        db_conn = st.connection("neon", type="sql")
         citations = get_citations(response)
         with db_conn.session as session:
             session.execute(
@@ -739,7 +739,6 @@ def format_contacts(
     contacts: list[Contact] = response.parsed
 
     if save_to_db and contacts:
-        db_conn = st.connection("neon", type="sql")
         for contact in contacts:
             # Check if email is valid
             email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
@@ -803,7 +802,6 @@ def load_control_df():
     """
     Load ir_contacts table from database to session state
     """
-    db_conn = st.connection("neon", type="sql")
     st.session_state.control_df = db_conn.query(
         "SELECT id, stock_code, name, iaq_grade, last_updated_filings_at, "
         "last_updated_grade_at, last_updated_contacts_at, created_at "
@@ -816,7 +814,6 @@ def edit_control_df():
     """
     Save changes to control table in database
     """
-    db_conn = st.connection("neon", type="sql")
     control_df = st.session_state.control_df
     control_key = st.session_state.control_key
 
@@ -894,7 +891,6 @@ def load_esg_filings_df():
     """
     Load esg_filings table from database to session state
     """
-    db_conn = st.connection("neon", type="sql")
     st.session_state.esg_filings_df = db_conn.query(
         "SELECT id, stock_code, release_time, title, "
         "url, created_at "
@@ -907,8 +903,6 @@ def edit_esg_filings_df():
     """
     Save changes to esg_filings table in database
     """
-    db_conn = st.connection("neon", type="sql")
-
     # Update database based on edited_rows
     if edited_rows := st.session_state.esg_filings_key["edited_rows"]:
         for row_idx, changes in edited_rows.items():
@@ -1013,7 +1007,6 @@ def load_iaq_gradings_df():
     Load entire iaq_gradings table from database to session state.
     Used only when generating Excel download.
     """
-    db_conn = st.connection("neon", type="sql")
     # Get iaq_gradings table from database
     st.session_state.iaq_gradings_df = db_conn.query(
         "SELECT * FROM iaq_gradings ORDER BY updated_at",
@@ -1025,7 +1018,6 @@ def load_iaq_grading(stock_code: str):
     """
     Get IAQ grading for a stock code from database
     """
-    db_conn = st.connection("neon", type="sql")
     # Load data by stock code from database
     iaq_grading = db_conn.query(
         "SELECT stock_code, overview, justification, extracts "
@@ -1059,7 +1051,6 @@ def edit_iaq_grading(
     justification = st.session_state.get(f"justification_{stock_code}", "")
     extracts = st.session_state.get(f"extracts_{stock_code}", "")
 
-    db_conn = st.connection("neon", type="sql")
     with db_conn.session as session:
         # Update control if changes made to grade
         if grade != st.session_state.iaq_grading["iaq_grade"].iloc[0]:
@@ -1141,7 +1132,6 @@ def load_ir_contacts_df():
     """
     Load ir_contacts table from database to session state
     """
-    db_conn = st.connection("neon", type="sql")
     st.session_state.ir_contacts_df = db_conn.query(
         "SELECT id, stock_code, email, name, tel, title, "
         "citations, created_at "
@@ -1154,8 +1144,6 @@ def edit_ir_contacts_df():
     """
     Save changes to ir_contacts table in database
     """
-    db_conn = st.connection("neon", type="sql")
-
     # Update database based on edited_rows
     if edited_rows := st.session_state.ir_contacts_key["edited_rows"]:
         for row_idx, changes in edited_rows.items():
@@ -1284,7 +1272,6 @@ def load_llm_logs_df():
     """
     Load llm_logs table from database to session state
     """
-    db_conn = st.connection("neon", type="sql")
     st.session_state.llm_logs_df = db_conn.query(
         "SELECT id, stock_code, prompt, response, "
         "citations, created_at "
