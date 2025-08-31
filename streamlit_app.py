@@ -4,6 +4,8 @@ App deployed on Streamlit Community Cloud
 
 from datetime import datetime
 from datetime import timedelta
+from email.message import EmailMessage
+from email.policy import default
 import re
 import time
 from typing import List
@@ -12,13 +14,13 @@ from typing import Union
 from io import BytesIO
 import random
 
+from dateutil import parser
 from google import genai
 from google.genai import types
 import pandas as pd
 from pydantic import BaseModel
 import pytz
 import sqlalchemy.exc
-from sqlalchemy import text as sql_text
 import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -28,11 +30,65 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
+from supabase import create_client
 from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 
-db_conn = st.connection("supabase", type="sql")
+# -------------------------- CSS for Navigation Bar -------------------------- #
+st.markdown(
+    """
+    <style>
+        /* Container for radio group */
+        div.stRadio > div[role="radiogroup"] {
+            flex-direction: row;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 20px;
+        }
+        /* Hide radio circles */
+        div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child {
+            display: none !important;
+        }
+        /* Style individual tabs (labels) */
+        div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > div {
+            padding: 10px 20px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-bottom: none;
+            background-color: var(--secondary-background-color, #333333); /* Fallback to dark gray */
+            color: var(--text-color, #ffffff); /* Fallback to white */
+            cursor: pointer;
+            margin-right: -1px;
+            border-radius: 4px 4px 0 0;
+            transition: background-color 0.3s;
+        }
+        /* Hover effect for unselected tabs */
+        div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > div:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        /* Selected tab: Force primary color */
+        div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > input[type="radio"]:checked + div {
+            background-color: var(--primary-color, #ff4b4b) !important; /* Fallback to red */
+            border-bottom: 1px solid var(--primary-color, #ff4b4b) !important;
+            color: #ffffff !important; /* White for contrast */
+            font-weight: bold;
+        }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+# ------------------------------- DB Connection ------------------------------ #
+@st.cache_resource
+def init_connection():
+    """
+    Initialize connection to Supabase database.
+    """
+    url = st.secrets.connections.supabase.SUPABASE_URL
+    key = st.secrets.connections.supabase.SUPABASE_KEY
+    return create_client(url, key)
+
+
+supabase = init_connection()
 
 
 # ---------------------------------------------------------------------------- #
@@ -79,18 +135,8 @@ def get_stock_codes_tbu(
         msg = "Either update_filings or update_contacts must be True"
         raise ValueError(msg)
 
-    # Load control_df if it is not loaded in session state
-    if "control_df" not in st.session_state:
-        load_control_df()
-
     # Determine the field to filter
     field = "last_updated_filings_at" if update_filings else "last_updated_contacts_at"
-
-    # Ensure the datetime column is timezone-aware (UTC)
-    if st.session_state.control_df[field].dtype == "datetime64[ns]":
-        st.session_state.control_df[field] = st.session_state.control_df[
-            field
-        ].dt.tz_localize("UTC")
 
     # Create condition to select rows where field is NULL
     condition = st.session_state.control_df[field].isna()
@@ -176,16 +222,10 @@ def embed_citations(response: types.GenerateContentResponse) -> str:
 
 
 # -------------------------------- ESG Filings ------------------------------- #
-def get_last_updated_at(
-    stock_code: str, *, in_local_tz: bool = True
-) -> datetime | None:
+def get_last_updated_filings_at(stock_code: str) -> datetime | None:
     """
     Get the timestamp of last updated at for a stock code.
     """
-    # Load control_df if it is not loaded in session state
-    if "control_df" not in st.session_state:
-        load_control_df()
-
     # Filter control_df for the given stock_code and select last_updated_filings_at
     condition = st.session_state.control_df["stock_code"] == stock_code
     result_df = st.session_state.control_df[condition][["last_updated_filings_at"]]
@@ -194,13 +234,6 @@ def get_last_updated_at(
     result = (
         result_df["last_updated_filings_at"].iloc[0] if not result_df.empty else None
     )
-
-    # convert to local timezone if specified
-    if in_local_tz and result:
-        # Localize the naive timestamp to UTC and then convert to the target timezone
-        result = result.tz_localize("UTC").tz_convert("Asia/Hong_Kong")
-        # Convert the timezone-aware pandas Timestamp to a timezone-aware python datetime object
-        result = result.to_pydatetime()
     return result
 
 
@@ -216,7 +249,9 @@ def get_earliest_release_time(driver: webdriver.Chrome) -> datetime | None:
         last_row = result_rows[-1]
         last_row_cells = last_row.find_elements(By.TAG_NAME, "td")
         earliest_release_time_str = last_row_cells[0].text
-        return datetime.strptime(earliest_release_time_str, "%d/%m/%Y %H:%M")
+        return pytz.timezone("Asia/Hong_Kong").localize(
+            datetime.strptime(earliest_release_time_str, "%d/%m/%Y %H:%M")
+        )
     return None
 
 
@@ -352,10 +387,7 @@ def scrape(
 
     # b) load more records if i) there is no last_updated_at
     # or ii) earliest_release_time is after last_updated_at
-    last_updated_at = get_last_updated_at(
-        stock_code=stock_code,
-        in_local_tz=True,
-    )
+    last_updated_at = get_last_updated_filings_at(stock_code)
     while True:
         if last_updated_at is not None:
             earliest_release_time = get_earliest_release_time(driver)
@@ -382,7 +414,9 @@ def scrape(
         cells = row.find_elements(By.TAG_NAME, "td")
         # extract and convert release_time
         release_time_str = cells[0].text
-        release_time = datetime.strptime(release_time_str, "%d/%m/%Y %H:%M")
+        release_time = pytz.timezone("Asia/Hong_Kong").localize(
+            datetime.strptime(release_time_str, "%d/%m/%Y %H:%M")
+        )
         # break if release_time is after last_updated_at
         if (last_updated_at is not None) and (last_updated_at > release_time):
             break
@@ -393,60 +427,38 @@ def scrape(
         # add key data to list
         data_lst.append(
             {
-                "release_time": release_time,
+                "stock_code": stock_code,
+                "release_time": release_time.isoformat(),
                 "title": doc_title,
                 "url": doc_url,
             }
         )
         # extract company name
-        if not company_name:
+        if (not company_name) or (company_name == ""):
             company_name = cells[2].text.split("\n")[0]
     # close browser
     driver.quit()
 
-    # d) save key data to esg_filings tab of master excel
+    # d) save key data to esg_filings tab
     if save_to_db:
-        for d in data_lst:
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("""
-                    INSERT INTO esg_filings (stock_code, release_time, title, url)
-                    VALUES (:stock_code, :release_time, :title, :url)
-                    ON CONFLICT (url) DO NOTHING
-                    """),
-                    {
-                        "stock_code": stock_code,
-                        "release_time": d.get("release_time"),
-                        "title": d.get("title"),
-                        "url": d.get("url"),
-                    },
-                )
-                session.commit()
+        if data_lst:
+            supabase.table("esg_filings").upsert(
+                data_lst,
+                ignore_duplicates=True,
+                on_conflict="url",
+            ).execute()
         # update last_updated_filings_at and company name in control table
-        with db_conn.session as session:
-            session.execute(
-                sql_text("""
-                UPDATE control
-                SET last_updated_filings_at = CURRENT_TIMESTAMP
-                WHERE stock_code = :stock_code
-                """),
-                params={"stock_code": stock_code},
-            )
-            if company_name:
-                session.execute(
-                    sql_text("""
-                    UPDATE control
-                    SET name = :name
-                    WHERE stock_code = :stock_code AND name IS NULL
-                    """),
-                    params={"name": company_name, "stock_code": stock_code},
-                )
-            session.commit()
+        supabase.table("control").update(
+            {"last_updated_filings_at": datetime.now(pytz.UTC).isoformat()}
+        ).eq("stock_code", stock_code).execute()
+        if company_name:
+            supabase.table("control").update({"name": company_name}).eq(
+                "stock_code", stock_code
+            ).is_("name", None).execute()
 
 
 # -------------------------------- IAQ Grading ------------------------------- #
 def grade_iaq(
-    client: genai.Client,
     stock_code: str,
     *,
     save_to_db: bool = True,
@@ -457,94 +469,97 @@ def grade_iaq(
     per request. And the maximum size for content retrieved from a
     single URL is 34MB
     See: https://ai.google.dev/gemini-api/docs/url-context
+    NOTE: As of 29 Aug 2025, Gemini 2.5 Pro has a 1 million token context
+    window (2 million coming soon), roughly 8 average length English novels.
+    Trial and error shows that it is enough for 10-15 filings at a time.
+    See: https://ai.google.dev/gemini-api/docs/long-context
     """
-    # Load relevant dataframes if not loaded in session state
-    if "control_df" not in st.session_state:
-        load_control_df()
-    if "esg_filings_df" not in st.session_state:
-        load_esg_filings_df()
-
     # Get stock code, company name from control df
-    condition = st.session_state.control_df["stock_code"] == stock_code
-    result_df = st.session_state.control_df[condition][["name"]]
-    company_name = result_df["name"].iloc[0] if not result_df.empty else ""
+    company_name = get_company_name(stock_code=stock_code) or ""
 
-    # Get most recent 20 filings from esg_filings df
+    # Get all filings from esg_filings df
     condition = st.session_state.esg_filings_df["stock_code"] == stock_code
-    filings_df = (
-        st.session_state.esg_filings_df[condition][["title", "url", "release_time"]]
-        .sort_values(by="release_time", ascending=False)
-        .head(20)
-    )
+    filings_df = st.session_state.esg_filings_df[condition][
+        ["title", "url", "release_time"]
+    ].sort_values(by="release_time", ascending=False)
 
-    filings = ""
-    if not filings_df.empty:
+    # Raise if no filings found
+    if filings_df.empty:
+        raise ValueError(f"No filings found in database for {stock_code}")
+
+    # Init list to store responses
+    responses = ""
+
+    # Chunk data and process in batches of 10
+    chunk_size = 10
+    for i in range(0, len(filings_df), chunk_size):
+        chunk_df = filings_df.iloc[i : i + chunk_size]
         filings = "\n".join(
-            [f"{row['title']}: {row['url']}" for _, row in filings_df.iterrows()]
+            [f"{row['title']}: {row['url']}" for _, row in chunk_df.iterrows()]
         )
 
-    # Create prompt
-    prompt = f"""You are an expert ESG analyst specializing in evaluating corporate disclosures for Hong Kong listed companies under the Hong Kong Stock Exchange (HKEX) ESG reporting guidelines.
-    Your task is to evaluate the ESG disclosures of the company {company_name} with a stock ticker of '{stock_code}' specifically on the topic of indoor air quality (IAQ). This includes any mentions of IAQ management, monitoring, policies, risks, mitigation strategies, emissions (e.g., VOCs, PM2.5, CO2 levels), ventilation systems, employee health impacts, building certifications (e.g., BEAM Plus, LEED), or related initiatives in its operation.
-    You are provided with below list of URLs to all of the company's ESG filings published onHKEx. Read content from these URLs, then extract and summarize only the sections relevant to indoor air quality.
-    {filings}
-    Evaluation Criteria:
-    Focus solely on indoor air quality disclosures. Grade based on:
+        # Create prompt
+        prompt = f"""You are an expert ESG analyst specializing in evaluating corporate disclosures for Hong Kong listed companies under the Hong Kong Stock Exchange (HKEX) ESG reporting guidelines.
+        Your task is to evaluate the ESG disclosures of the company {company_name} with a stock ticker of '{stock_code}' specifically on the topic of indoor air quality (IAQ). This includes any mentions of IAQ management, monitoring, policies, risks, mitigation strategies, emissions (e.g., VOCs, PM2.5, CO2 levels), ventilation systems, employee health impacts, building certifications (e.g., BEAM Plus, LEED), or related initiatives in its operation.
+        You are provided with below list of URLs to all of the company's ESG filings published onHKEx. Read content from these URLs, then extract and summarize only the sections relevant to indoor air quality.
+        {filings}
+        Evaluation Criteria:
+        Focus solely on indoor air quality disclosures. Grade based on:
 
-    # Length and Detail: Short/vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
-    # Key Performance Indicators (KPIs): Presence of quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
-    # Consistency: How regularly KPIs are reported over time; improvements or expansions in disclosure (e.g., adding new metrics or deeper analysis in recent years).
-    # Progression: Emphasis on the last three years to assess if disclosure has improved.
+        # Length and Detail: Short/vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
+        # Key Performance Indicators (KPIs): Presence of quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
+        # Consistency: How regularly KPIs are reported over time; improvements or expansions in disclosure (e.g., adding new metrics or deeper analysis in recent years).
+        # Progression: Emphasis on the last three years to assess if disclosure has improved.
 
-    # Grading Scale:
-    # Use a three-tier grading system. Assign one grade only, with a brief justification tied to the criteria above. Buckets:
+        # Grading Scale:
+        # Use a three-tier grading system. Assign one grade only, with a brief justification tied to the criteria above. Buckets:
 
-    # Low (No or Minimal Disclosure): Little to no mention of IAQ across reports; generic statements without details, KPIs, or data; no evidence of consistency or improvement.
-    # Medium (Emerging Disclosure): Basic mentions starting or increasing in the recent three years; some details or initial KPIs introduced recently, but inconsistent reporting or limited depth/trends.
-    # High (Strong Disclosure): Comprehensive, detailed sections on IAQ with multiple KPIs disclosed consistently over years; evidence of adding more information (e.g., year-over-year data, targets, audits) and progressive improvements in recent reports.
+        # Low (No or Minimal Disclosure): Little to no mention of IAQ across reports; generic statements without details, KPIs, or data; no evidence of consistency or improvement.
+        # Medium (Emerging Disclosure): Basic mentions starting or increasing in the recent three years; some details or initial KPIs introduced recently, but inconsistent reporting or limited depth/trends.
+        # High (Strong Disclosure): Comprehensive, detailed sections on IAQ with multiple KPIs disclosed consistently over years; evidence of adding more information (e.g., year-over-year data, targets, audits) and progressive improvements in recent reports.
 
-    # Output Format:
-    # Structure your response as follows:
+        # Output Format:
+        # Structure your response as follows:
+        # Company Overview: Brief 1-2 sentence summary of the company's business and why IAQ might be material (e.g., based on industry like real estate or hospitality).
+        # Key Extracts: Bullet points of relevant IAQ excerpts from each report (cite year and URL).
+        # Grade: [Low/Medium/High]
+        # Justification for grade: Explanation in 3-5 sentences.
+        # """
 
-    # Company Overview: Brief 1-2 sentence summary of the company's business and why IAQ might be material (e.g., based on industry like real estate or hospitality).
-    # Key Extracts: Bullet points of relevant IAQ excerpts from each report (cite year and URL).
-    # Grade: [Low/Medium/High]
-    # Justification for grade: Explanation in 3-5 sentences.
-    # """
+        client = get_llm_client()
+        # Send prompt
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[
+                    {"url_context": {}},
+                ],
+                temperature=0.3,
+            ),
+        )
 
-    # Send prompt
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[
-                {"url_context": {}},
-            ],
-            temperature=0.3,
-        ),
-    )
+        # Raise if response is null
+        if not response.text:
+            msg = "Null value in response text."
+            raise ValueError(msg)
 
-    if save_to_db:
-        citations = get_citations(response)
-        with db_conn.session as session:
-            session.execute(
-                sql_text("""
-                INSERT INTO llm_logs (stock_code, prompt, response, citations)
-                VALUES (:stock_code, :prompt, :response, :citations)
-                """),
+        if save_to_db:
+            citations = get_citations(response)
+            supabase.table("llm_logs").insert(
                 {
                     "stock_code": stock_code,
                     "prompt": prompt,
                     "response": response.text,
                     "citations": "\n".join(citations) if citations else "None",
-                },
-            )
-            session.commit()
-    return response.text
+                }
+            ).execute()
+
+        responses += response.text
+    return responses
 
 
 def format_grading(
-    client: genai.Client,
     stock_code: str,
     response_text: str,
     *,
@@ -553,10 +568,11 @@ def format_grading(
     """
     Format text response to specified JSON schema.
     """
-    prompt = f"""You are an expert data extraction tool. Your task is to analyze the text provided below and extract key details from the ESG grading report prepared by an expert ESG analyst.
+    client = get_llm_client()
+    prompt = f"""You are an expert data extraction tool. Your task is to analyze the text provided below and extract key details from one or more ESG grading report(s) prepared by an expert ESG analyst.
 
     From the text, identify the following for each report found:
-    - grade: make sure it is one of [Low/Medium/High]
+    - grade: make sure it is one of [Low/Medium/High]. prioritize grade that are based on more recent ESG filings
     - company overview
     - key extracts
     - Justification for grade
@@ -582,58 +598,40 @@ def format_grading(
     grade: Grade = response.parsed
 
     if save_to_db and grade:
-        with db_conn.session as session:
-            # Add to iaq_gradings table
-            session.execute(
-                sql_text("""
-                INSERT INTO iaq_gradings (stock_code, overview, justification, extracts, updated_at)
-                VALUES (:stock_code, :overview, :justification, :extracts, CURRENT_TIMESTAMP)
-                ON CONFLICT (stock_code) DO UPDATE
-                SET overview = EXCLUDED.overview,
-                    justification = EXCLUDED.justification,
-                    extracts = EXCLUDED.extracts,
-                    updated_at = CURRENT_TIMESTAMP
-                """),
-                {
-                    "stock_code": stock_code,
-                    "overview": grade.overview,
-                    "justification": grade.justification,
-                    "extracts": grade.extracts,
-                },
-            )
-            # Update iaq_grade and last_updated_grade_at in control table
-            session.execute(
-                sql_text("""
-                UPDATE control
-                SET iaq_grade = :iaq_grade, last_updated_grade_at = CURRENT_TIMESTAMP
-                WHERE stock_code = :stock_code
-                """),
-                {
-                    "iaq_grade": grade.grade,
-                    "stock_code": stock_code,
-                },
-            )
-            # Add to llm logs table
-            citations = get_citations(response)
-            session.execute(
-                sql_text("""
-                INSERT INTO llm_logs (stock_code, prompt, response, citations)
-                VALUES (:stock_code, :prompt, :response, :citations)
-                """),
-                {
-                    "stock_code": stock_code,
-                    "prompt": prompt,
-                    "response": response.text,
-                    "citations": "\n".join(citations) if citations else "None",
-                },
-            )
-            session.commit()
+        # Add to iaq_gradings table
+        supabase.table("iaq_gradings").upsert(
+            {
+                "stock_code": stock_code,
+                "overview": grade.overview,
+                "justification": grade.justification,
+                "extracts": grade.extracts,
+                "updated_at": datetime.now(pytz.UTC).isoformat(),
+            },
+            on_conflict="stock_code",
+        ).execute()
+        # Update iaq_grade and last_updated_grade_at in control table
+        supabase.table("control").update(
+            {
+                "iaq_grade": grade.grade,
+                "last_updated_grade_at": datetime.now(pytz.UTC).isoformat(),
+            }
+        ).eq("stock_code", stock_code).execute()
+        # Add to llm logs table
+        citations = get_citations(response)
+        supabase.table("llm_logs").insert(
+            {
+                "stock_code": stock_code,
+                "prompt": prompt,
+                "response": response.text,
+                "citations": "\n".join(citations) if citations else "None",
+            }
+        ).execute()
+
     return grade
 
 
 # -------------------------------- IR Contacts ------------------------------- #
 def search_contacts(
-    client: genai.Client,
     stock_code: str,
     *,
     save_to_db: bool = True,
@@ -644,15 +642,12 @@ def search_contacts(
     to simultaneously use a grounding tool and enforce a structured JSON output.
     See: https://github.com/googleapis/python-genai/issues/665
     """
-    # Load control_df if it is not loaded in session state
-    if "control_df" not in st.session_state:
-        load_control_df()
-
     # Filter control_df for the given stock_code and get name
     condition = st.session_state.control_df["stock_code"] == stock_code
     result_df = st.session_state.control_df[condition][["name"]]
     company_name = result_df["name"].iloc[0] if not result_df.empty else ""
 
+    client = get_llm_client()
     # Create prompt
     prompt = (
         "Imagine you are an ESG reporting consultant trying to reach "
@@ -678,27 +673,25 @@ def search_contacts(
         ),
     )
 
+    # Raise if response is null
+    if not response.text:
+        msg = "Null value in response text."
+        raise ValueError(msg)
+
     if save_to_db:
         citations = get_citations(response)
-        with db_conn.session as session:
-            session.execute(
-                sql_text("""
-                INSERT INTO llm_logs (stock_code, prompt, response, citations)
-                VALUES (:stock_code, :prompt, :response, :citations)
-                """),
-                {
-                    "stock_code": stock_code,
-                    "prompt": prompt,
-                    "response": response.text,
-                    "citations": "\n".join(citations) if citations else "None",
-                },
-            )
-            session.commit()
+        supabase.table("llm_logs").insert(
+            {
+                "stock_code": stock_code,
+                "prompt": prompt,
+                "response": response.text,
+                "citations": "\n".join(citations) if citations else "None",
+            }
+        ).execute()
     return embed_citations(response)
 
 
 def format_contacts(
-    client: genai.Client,
     stock_code: str,
     response_text: str,
     *,
@@ -707,6 +700,7 @@ def format_contacts(
     """
     Format key data from grounded information to specified JSON schema.
     """
+    client = get_llm_client()
     prompt = f"""You are an expert data extraction tool. Your task is to analyze the text provided below and extract all available contact details for the Investor Relations department.
 
     From the text, identify the following for each contact found:
@@ -738,60 +732,108 @@ def format_contacts(
     )
     contacts: list[Contact] = response.parsed
 
+    # keep contacts with valid email pattern
+    email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    valid_contacts = [
+        {
+            "stock_code": stock_code,
+            "email": contact.email,
+            "name": contact.name,
+            "tel": contact.tel,
+            "title": contact.title,
+            "citations": "\n".join(contact.citations) if contact.citations else None,
+        }
+        for contact in contacts
+        if re.match(email_pattern, contact.email)
+    ]
+
     if save_to_db and contacts:
-        for contact in contacts:
-            # Check if email is valid
-            email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-            if not re.match(email_pattern, contact.email):
-                continue
-            # Add to contacts table
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("""
-                    INSERT INTO ir_contacts (stock_code, email, name, tel, title, citations)
-                    VALUES (:stock_code, :email, :name, :tel, :title, :citations)
-                    ON CONFLICT ON CONSTRAINT ir_contacts_stock_email_key DO NOTHING
-                    """),
-                    {
-                        "stock_code": stock_code,
-                        "email": contact.email,
-                        "name": contact.name,
-                        "tel": contact.tel,
-                        "title": contact.title,
-                        "citations": "\n".join(contact.citations)
-                        if contact.citations
-                        else None,
-                    },
-                )
-                session.commit()
+        # Add to contacts table
+        supabase.table("ir_contacts").upsert(
+            valid_contacts,
+            ignore_duplicates=True,
+            on_conflict="stock_code,email",
+        ).execute()
         # Update last_updated_contacts_at in control table
-        with db_conn.session as session:
-            session.execute(
-                sql_text("""
-                UPDATE control
-                SET last_updated_contacts_at = CURRENT_TIMESTAMP
-                WHERE stock_code = :stock_code
-                """),
-                {
-                    "stock_code": stock_code,
-                },
-            )
-            # Add to llm logs table
-            citations = get_citations(response)
-            session.execute(
-                sql_text("""
-                INSERT INTO llm_logs (stock_code, prompt, response, citations)
-                VALUES (:stock_code, :prompt, :response, :citations)
-                """),
-                {
-                    "stock_code": stock_code,
-                    "prompt": prompt,
-                    "response": response.text,
-                    "citations": "\n".join(citations) if citations else "None",
-                },
-            )
-            session.commit()
+        supabase.table("control").update(
+            {"last_updated_contacts_at": datetime.now(pytz.UTC).isoformat()}
+        ).eq("stock_code", stock_code).execute()
+        # Add to llm logs table
+        citations = get_citations(response)
+        supabase.table("llm_logs").insert(
+            {
+                "stock_code": stock_code,
+                "prompt": prompt,
+                "response": response.text,
+                "citations": "\n".join(citations) if citations else "None",
+            }
+        ).execute()
     return contacts
+
+
+# ----------------------------------- Email ---------------------------------- #
+def draft_email():
+    '''
+    Generate email content with AI.
+    '''
+    prompt = f"""Imagine you represent an ESG consultant from the Hong Kong-based NGO ({st.secrets.NGO_URL}). Draft a professional introduction email to the Investor Relations (IR) department of the company with a stock ticker of '{st.session_state.selected_stock_code}'"""
+
+    if (
+        "selected_company_name" in st.session_state
+        and st.session_state.selected_company_name
+    ):
+        prompt += f", {st.session_state.selected_company_name}"
+
+    if f"justification_{st.session_state.selected_stock_code}" in st.session_state:
+        prompt += f". Consider the following assessment on its disclosures with regard to IAQ: {st.session_state[f'justification_{st.session_state.selected_stock_code}']}"
+
+    prompt += """. The goal is to discuss ways to implement Indoor Air Quality (IAQ) best practices and improve
+    IAQ disclosures in their ESG reports. Key points to include:
+    - Polite introduction and context on HKEX ESG guidelines.
+    - Suggest next steps (e.g., meeting to share best practices).
+    - End with a call to action.
+
+    Draft and return the body of the email only. Keep it concise (200-300 words), professional, and positive. Do not include email subject, recipient line and signature etc.
+    """
+
+    client = get_llm_client()
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[
+                {"url_context": {}},
+            ],
+            temperature=0.8,
+        ),
+    )
+    st.session_state.email_content = response.text
+
+
+def generate_email():
+    '''
+    Generate .eml file.
+    '''
+    custom_policy = default.clone(max_line_length=0, linesep="\r\n")
+
+    # Create .eml file content with custom policy
+    msg = EmailMessage(policy=custom_policy)
+    msg.set_content(
+        st.session_state.get("email_content", None),
+        subtype="plain",
+        charset="utf-8",
+        cte="8bit",
+    )  # Set cte='8bit' directly
+
+    # Email headers
+    msg["Subject"] = st.session_state.get("email_subject", None)
+    msg["To"] = st.session_state.get("email_contacts", None)
+    msg["Date"] = datetime.now(pytz.timezone("Asia/Hong_Kong")).strftime(
+        "%a, %d %b %Y %H:%M:%S %z"
+    )
+    msg["X-Unsent"] = "1"  # marked as draft
+
+    return msg.as_string()
 
 
 # ---------------------------------------------------------------------------- #
@@ -802,11 +844,41 @@ def load_control_df():
     """
     Load ir_contacts table from database to session state
     """
-    st.session_state.control_df = db_conn.query(
-        "SELECT id, stock_code, name, iaq_grade, last_updated_filings_at, "
-        "last_updated_grade_at, last_updated_contacts_at, created_at "
-        "FROM control ORDER BY created_at",
-        ttl=15,
+    response = supabase.table("control").select("*").order("stock_code").execute()
+    df = pd.DataFrame(response.data)
+
+    # convert datetime fields
+    if not df.empty:
+        datetime_columns = [
+            "last_updated_filings_at",
+            "last_updated_grade_at",
+            "last_updated_contacts_at",
+            "created_at",
+        ]
+        hkt_tz = pytz.timezone("Asia/Hong_Kong")
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: parser.parse(x).replace(tzinfo=hkt_tz)
+                    if pd.notnull(x)
+                    else pd.NaT
+                )
+
+    st.session_state.control_df = df
+
+
+def load_tabs():
+    """
+    Load ESG filing, IAQ grading and IR contact tabs from database to session state
+    """
+    st.session_state.esg_filings_df = load_esg_filings(
+        stock_code=st.session_state.selected_stock_code
+    )
+    st.session_state.iaq_gradings_df = load_iaq_gradings(
+        stock_code=st.session_state.selected_stock_code
+    )
+    st.session_state.ir_contacts_df = load_ir_contacts(
+        stock_code=st.session_state.selected_stock_code
     )
 
 
@@ -825,78 +897,76 @@ def edit_control_df():
             changes.pop("stock_code", None)
             if not changes:
                 continue
-            # Construct sql query
-            set_clause = ", ".join(f"{key} = :{key}" for key in changes.keys())
-            params = dict(changes.items())
-            params["code"] = code
-
-            with db_conn.session as session:
-                session.execute(
-                    sql_text(f"""
-                    UPDATE control
-                    SET {set_clause}
-                    WHERE stock_code = :code
-                    """),
-                    params,
-                )
-                session.commit()
+            supabase.table("control").update(
+                changes,
+            ).eq("stock_code", code).execute()
 
     # Add stock_codes to database based on added_rows
     if added_rows := control_key["added_rows"]:
-        for row in added_rows:
-            code = row.get("stock_code")
-            name = row.get("name")
-            grade = row.get("iaq_grade")
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("""
-                    INSERT INTO control (stock_code, name, iaq_grade)
-                    VALUES (:code, :name, :grade)
-                    ON CONFLICT (stock_code) DO NOTHING
-                    """),
-                    {
-                        "code": code,
-                        "name": name,
-                        "grade": grade,
-                    },
-                )
-                session.commit()
+        supabase.table("control").upsert(added_rows, on_conflict="stock_code").execute()
 
     # Remove deleted rows from database
     if deleted_rows := control_key["deleted_rows"]:
-        for row_idx in deleted_rows:
-            code = control_df.iloc[row_idx]["stock_code"]
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("DELETE FROM control WHERE stock_code = :code"),
-                    {"code": code},
-                )
-                session.commit()
+        codes_to_delete = [
+            control_df.iloc[row_idx]["stock_code"] for row_idx in deleted_rows
+        ]
+        supabase.table("control").delete().in_("stock_code", codes_to_delete).execute()
 
     # Reset edit_control toggle
-    st.session_state.edit_control = False
+    st.session_state.control_toggle = False
 
-    # Reset session state if there are any changes
     if edited_rows or added_rows or deleted_rows:
         # Delete control_key from session state
         del st.session_state.control_key
-        # Delete control_df from session state to force reloading
-        del st.session_state.control_df
+        # Reset control_df from session state to force reloading
+        load_control_df()
+        # Show success message
+        st.success("Changes to the table saved successfully!")
 
-    st.success("Changes to the table saved successfully!")
+
+def get_company_name(stock_code: str) -> str | None:
+    '''
+    Get company name from control table.
+    '''
+    condition = st.session_state.control_df["stock_code"] == stock_code
+    result_df = st.session_state.control_df[condition][["name"]]
+    return result_df["name"].iloc[0] if not result_df.empty else None
 
 
 # -------------------------------- ESG Filings ------------------------------- #
-def load_esg_filings_df():
+def load_esg_filings(
+    stock_code: str | None,
+) -> pd.DataFrame:
     """
     Load esg_filings table from database to session state
     """
-    st.session_state.esg_filings_df = db_conn.query(
-        "SELECT id, stock_code, release_time, title, "
-        "url, created_at "
-        "FROM esg_filings ORDER BY created_at",
-        ttl=15,
+    q = supabase.table("esg_filings").select(
+        "id",
+        "stock_code",
+        "release_time",
+        "title",
+        "url",
+        "created_at",
     )
+    if stock_code:
+        q.eq("stock_code", stock_code)
+
+    response = (
+        q.order("stock_code", desc=False).order("release_time", desc=True).execute()
+    )
+    df = pd.DataFrame(response.data)
+
+    # convert datetime fields
+    if not df.empty:
+        datetime_columns = ["release_time", "created_at"]
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
+                # Localize to Asia/Hong_Kong
+                df[col] = df[col].dt.tz_localize(
+                    "Asia/Hong_Kong", ambiguous="raise", nonexistent="raise"
+                )
+    return df
 
 
 def edit_esg_filings_df():
@@ -911,132 +981,102 @@ def edit_esg_filings_df():
             changes.pop("stock_code", None)
             if not changes:
                 continue
-            # Construct sql query
-            set_clause = ", ".join(f"{key} = :{key}" for key in changes.keys())
-            params = dict(changes.items())
-            params["id"] = pid
-
-            with db_conn.session as session:
-                session.execute(
-                    sql_text(f"""
-                    UPDATE esg_filings
-                    SET {set_clause}
-                    WHERE id = :id
-                    """),
-                    params,
-                )
-                session.commit()
+            supabase.table("esg_filings").update(
+                changes,
+            ).eq("id", pid).execute()
 
     # Add new rows to database based on added_rows
     if added_rows := st.session_state.esg_filings_key["added_rows"]:
-        for row in added_rows:
-            # Define allowed fields for insertion
-            allowed_fields = ["stock_code", "release_time", "title", "url"]
-            insert_fields = [field for field in allowed_fields if field in row]
-            # Construct sql query
-            fields = ", ".join(insert_fields)
-            placeholders = ", ".join(f":{field}" for field in insert_fields)
-            params = {field: row[field] for field in insert_fields}
-
-            with db_conn.session as session:
-                session.execute(
-                    sql_text(f"""
-                    INSERT INTO esg_filings ({fields})
-                    VALUES ({placeholders})
-                    ON CONFLICT (url) DO NOTHING
-                    """),
-                    params,
-                )
-                session.commit()
+        # Define allowed fields for insertion
+        allowed_fields = ["stock_code", "release_time", "title", "url"]
+        rows_to_insert = [
+            {field: row[field] for field in allowed_fields if field in row}
+            for row in added_rows
+        ]
+        if rows_to_insert:
+            supabase.table("esg_filings").upsert(
+                rows_to_insert,
+                ignore_duplicates=True,
+                on_conflict="url",
+            ).execute()
 
     # Remove deleted rows from esg_filings table
     if deleted_rows := st.session_state.esg_filings_key["deleted_rows"]:
-        for row_idx in deleted_rows:
-            pid = int(st.session_state.esg_filings_df.iloc[row_idx]["id"])
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("DELETE FROM esg_filings WHERE id = :id"),
-                    {"id": pid},
-                )
-                session.commit()
+        ids_to_delete = [
+            int(st.session_state.esg_filings_df.iloc[row_idx]["id"])
+            for row_idx in deleted_rows
+        ]
+        supabase.table("esg_filings").delete().in_("id", ids_to_delete).execute()
 
-    # Reset edit_control toggle
-    st.session_state.edit_esg_filings = False
+    # Reset esg_filings_toggle
+    st.session_state.esg_filings_toggle = False
 
     # Reset session state if there are any changes
     if edited_rows or added_rows or deleted_rows:
         # Delete esg_filings_key from session state
         del st.session_state.esg_filings_key
-        # Delete esg_filings_df from session state to force reloading
-        del st.session_state.esg_filings_df
+        # Reload esg_filings_df
+        st.session_state.esg_filings_df = load_esg_filings(
+            stock_code=st.session_state.selected_stock_code
+        )
 
     st.success("Changes to the table saved successfully!")
 
 
 def update_esg_filings_df(
-    weeks: int,
+    stock_codes: list[str],
 ):
     """
     Fetch ESG filings with Gemini, and trigger reload of esg_filings_df and control_df
     """
-    # Calculate update_before
-    update_before = datetime.now(pytz.UTC) - timedelta(weeks=int(weeks))
-
-    # Get stock codes to update
-    stock_codes = get_stock_codes_tbu(update_filings=True, update_before=update_before)
-
     for code in stock_codes:
         try:
             scrape(stock_code=code, save_to_db=True)
         except sqlalchemy.exc.IntegrityError:
             pass
+        else:
+            st.success(f"ESG filings successfully updated for {code}!")
 
     # Reset session state
-    del st.session_state.esg_filings_df
-    del st.session_state.control_df
-
-    st.success(
-        "ESG filings successfully updated for stock codes "
-        f"last fetched more than {weeks} weeks ago!"
-    )
+    load_control_df()
+    if "selected_stock_code" in st.session_state:
+        st.session_state.esg_filings_df = load_esg_filings(
+            stock_code=st.session_state.selected_stock_code
+        )
 
 
 # -------------------------------- IAQ Grading ------------------------------- #
-def load_iaq_gradings_df():
+def load_iaq_gradings(
+    stock_code: str | None,
+):
     """
-    Load entire iaq_gradings table from database to session state.
-    Used only when generating Excel download.
+    Load iaq_gradings from database to session state.
     """
-    # Get iaq_gradings table from database
-    st.session_state.iaq_gradings_df = db_conn.query(
-        "SELECT * FROM iaq_gradings ORDER BY updated_at",
-        ttl=15,
-    )
+    q = supabase.table("iaq_gradings").select("*")
+    if stock_code:
+        q.eq("stock_code", stock_code)
 
+    response = q.order("stock_code", desc=False).execute()
+    df = pd.DataFrame(response.data)
 
-def load_iaq_grading(stock_code: str):
-    """
-    Get IAQ grading for a stock code from database
-    """
-    # Load data by stock code from database
-    iaq_grading = db_conn.query(
-        "SELECT stock_code, overview, justification, extracts "
-        "FROM iaq_gradings WHERE stock_code = :code",
-        params={"code": stock_code},
-        ttl=15,
-    )
-
-    if not iaq_grading.empty:
-        # Load control_df if not loaded in session state
-        if "control_df" not in st.session_state:
-            load_control_df()
+    # convert datetime fields
+    if not df.empty:
+        datetime_columns = ["updated_at"]
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
+                # Localize to Asia/Hong_Kong
+                df[col] = df[col].dt.tz_localize(
+                    "Asia/Hong_Kong", ambiguous="raise", nonexistent="raise"
+                )
         # Merge with control_df to add iaq_grade column
-        iaq_grading = iaq_grading.merge(
+        df = df.merge(
             st.session_state.control_df[["stock_code", "iaq_grade"]],
             on="stock_code",
             how="left",
         )
-    st.session_state.iaq_grading = iaq_grading
+
+    return df
 
 
 def edit_iaq_grading(
@@ -1051,42 +1091,31 @@ def edit_iaq_grading(
     justification = st.session_state.get(f"justification_{stock_code}", "")
     extracts = st.session_state.get(f"extracts_{stock_code}", "")
 
-    with db_conn.session as session:
-        # Update control if changes made to grade
-        if grade != st.session_state.iaq_grading["iaq_grade"].iloc[0]:
-            session.execute(
-                sql_text(
-                    "UPDATE control SET iaq_grade = :grade WHERE stock_code = :code"
-                ),
-                {"grade": grade, "code": stock_code},
-            )
-            # Delete control_df from session state to force reloading
-            del st.session_state.control_df
-            # Reload iaq_grading from session state
-            load_iaq_grading(stock_code)
+    # Update control if changes made to grade
+    if grade != st.session_state.iaq_gradings_df["iaq_grade"].iloc[0]:
+        supabase.table("control").update({"iaq_grade": grade}).eq(
+            "stock_code", stock_code
+        ).execute()
+        # Reload control_df from session state
+        load_control_df()
+        # Reload iaq_grading from session state
+        st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
 
-        # Update iaq_gradings if changes made to overview, justification or extracts
-        if (
-            overview != st.session_state.iaq_grading["overview"].iloc[0]
-            or justification != st.session_state.iaq_grading["justification"].iloc[0]
-            or extracts != st.session_state.iaq_grading["extracts"].iloc[0]
-        ):
-            session.execute(
-                sql_text(
-                    "UPDATE iaq_gradings SET overview = :overview, "
-                    "justification = :justification, extracts = :extracts "
-                    "WHERE stock_code = :code"
-                ),
-                {
-                    "overview": overview,
-                    "justification": justification,
-                    "extracts": extracts,
-                    "code": stock_code,
-                },
-            )
-            # Reload iaq_grading from session state
-            load_iaq_grading(stock_code)
-        session.commit()
+    # Update iaq_gradings if changes made to overview, justification or extracts
+    if (
+        overview != st.session_state.iaq_gradings_df["overview"].iloc[0]
+        or justification != st.session_state.iaq_gradings_df["justification"].iloc[0]
+        or extracts != st.session_state.iaq_gradings_df["extracts"].iloc[0]
+    ):
+        supabase.table("iaq_gradings").update(
+            {
+                "overview": overview,
+                "justification": justification,
+                "extracts": extracts,
+            }
+        ).eq("stock_code", stock_code).execute()
+        # Reload iaq_grading from session state
+        st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
 
 
 def update_iaq_grading(
@@ -1098,46 +1127,62 @@ def update_iaq_grading(
     try:
         # Grade IAQ discloures with Gemini
         response_text = grade_iaq(
-            client=get_llm_client(),
             stock_code=stock_code,
             save_to_db=True,
         )
         # Format grade with Gemini and save to database
         format_grading(
-            client=get_llm_client(),
             stock_code=stock_code,
             response_text=response_text,
             save_to_db=True,
         )
-    except sqlalchemy.exc.IntegrityError as exc:
-        if 'null value in column "response"' in str(exc):
+    except ValueError as exc:
+        if "No filings found in database for" in str(exc):
+            msg = "No filings found in database. Please fetch filings first."
+            st.warning(msg, icon="⚠️")
+        elif "Null value in response text." in str(exc):
             msg = (
                 "Error encountered while using Gemini API to grade IAQ "
                 f"disclosures for {stock_code}. "
                 "This may be due to rate limits—please try again later."
             )
-            st.write(msg)
+            st.warning(msg, icon="⚠️")
         else:
-            st.write(exc)
+            st.warning(exc, icon="⚠️")
     else:
         st.success(f"IAQ grading report successfully generated for {stock_code}!")
 
     # Reset session state
-    del st.session_state.control_df
-    load_iaq_grading(stock_code)
+    load_control_df()
+    st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
 
 
 # -------------------------------- IR Contacts ------------------------------- #
-def load_ir_contacts_df():
+def load_ir_contacts(
+    stock_code: str | None,
+):
     """
-    Load ir_contacts table from database to session state
+    Load ir_contacts from database to session state
     """
-    st.session_state.ir_contacts_df = db_conn.query(
-        "SELECT id, stock_code, email, name, tel, title, "
-        "citations, created_at "
-        "FROM ir_contacts ORDER BY created_at",
-        ttl=15,
-    )
+    q = supabase.table("ir_contacts").select("*")
+    if stock_code:
+        q.eq("stock_code", stock_code)
+
+    response = q.order("stock_code", desc=False).execute()
+    df = pd.DataFrame(response.data)
+
+    # convert datetime fields
+    if not df.empty:
+        datetime_columns = ["created_at"]
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
+                # Localize to Asia/Hong_Kong
+                df[col] = df[col].dt.tz_localize(
+                    "Asia/Hong_Kong", ambiguous="raise", nonexistent="raise"
+                )
+
+    return df
 
 
 def edit_ir_contacts_df():
@@ -1152,132 +1197,117 @@ def edit_ir_contacts_df():
             changes.pop("stock_code", None)
             if not changes:
                 continue
-            # Construct sql query
-            set_clause = ", ".join(f"{key} = :{key}" for key in changes.keys())
-            params = dict(changes.items())
-            params["id"] = pid
-
-            with db_conn.session as session:
-                session.execute(
-                    sql_text(f"""
-                    UPDATE ir_contacts
-                    SET {set_clause}
-                    WHERE id = :id
-                    """),
-                    params,
-                )
-                session.commit()
+            supabase.table("ir_contacts").update(changes).eq("id", pid).execute()
 
     # Add new rows to database based on added_rows
     if added_rows := st.session_state.ir_contacts_key["added_rows"]:
-        for row in added_rows:
-            # Define allowed fields for insertion
-            allowed_fields = [
-                "stock_code",
-                "email",
-                "name",
-                "tel",
-                "title",
-                "citations",
-            ]
-            insert_fields = [field for field in allowed_fields if field in row]
-            # Construct sql query
-            fields = ", ".join(insert_fields)
-            placeholders = ", ".join(f":{field}" for field in insert_fields)
-            params = {field: row[field] for field in insert_fields}
-
-            with db_conn.session as session:
-                session.execute(
-                    sql_text(f"""
-                    INSERT INTO ir_contacts ({fields})
-                    VALUES ({placeholders})
-                    ON CONFLICT ON CONSTRAINT ir_contacts_stock_email_key DO NOTHING
-                    """),
-                    params,
-                )
-                session.commit()
+        # Define allowed fields for insertion
+        allowed_fields = [
+            "stock_code",
+            "email",
+            "name",
+            "tel",
+            "title",
+            "citations",
+        ]
+        rows_to_insert = [
+            {field: row[field] for field in allowed_fields if field in row}
+            for row in added_rows
+        ]
+        if rows_to_insert:
+            supabase.table("ir_contacts").upsert(
+                rows_to_insert,
+                ignore_duplicates=True,
+                on_conflict="stock_code,email",
+            ).execute()
 
     # Remove deleted rows from ir_contacts table
     if deleted_rows := st.session_state.ir_contacts_key["deleted_rows"]:
-        for row_idx in deleted_rows:
-            pid = int(st.session_state.ir_contacts_df.iloc[row_idx]["id"])
-            with db_conn.session as session:
-                session.execute(
-                    sql_text("DELETE FROM ir_contacts WHERE id = :id"),
-                    {"id": pid},
-                )
-                session.commit()
+        ids_to_delete = [
+            int(st.session_state.ir_contacts_df.iloc[row_idx]["id"])
+            for row_idx in deleted_rows
+        ]
+        supabase.table("ir_contacts").delete().in_("id", ids_to_delete).execute()
 
-    # Reset edit_control toggle
-    st.session_state.edit_ir_contacts = False
+    # Reset ir_contacts_toggle
+    st.session_state.ir_contacts_toggle = False
 
-    # Reset session state if there are any changes
     if edited_rows or added_rows or deleted_rows:
         # Delete ir_contacts_key from session state
         del st.session_state.ir_contacts_key
-        # Delete ir_contacts_df from session state to force reloading
-        del st.session_state.ir_contacts_df
-
-    st.success("Changes to the table saved successfully!")
+        # Reload ir_contacts_df
+        st.session_state.ir_contacts_df = load_ir_contacts(
+            stock_code=st.session_state.selected_stock_code
+        )
+        st.success("Changes to the table saved successfully!")
 
 
 def update_ir_contacts_df(
-    weeks: int,
+    stock_codes: list[str],
 ):
     """
     Update IR contacts with Gemini, and trigger reload of ir_contacts_df and control_df
     """
-    # Calculate update_before
-    update_before = datetime.now(pytz.UTC) - timedelta(weeks=int(weeks))
-
-    # Get stock codes to update
-    stock_codes = get_stock_codes_tbu(update_contacts=True, update_before=update_before)
-
     for code in stock_codes:
         # NOTE: Rate limit at 5 RPM, 250k TPM, 100 RPD for Gemini 2.5 Pro
         # https://ai.google.dev/gemini-api/docs/rate-limits
         try:
             # Search contacts with Gemini
             response_text = search_contacts(
-                client=get_llm_client(),
                 stock_code=code,
                 save_to_db=True,
             )
             # Format contacts with Gemini and save to database
             format_contacts(
-                client=get_llm_client(),
                 stock_code=code,
                 response_text=response_text,
                 save_to_db=True,
             )
-        except sqlalchemy.exc.IntegrityError as exc:
-            if 'null value in column "response"' in str(exc):
+        except ValueError as exc:
+            if "Null value in response text." in str(exc):
                 msg = (
-                    f"Error found while using Gemini API to extract contacts for {code}. "
-                    "Might have hit rate limit. Please retry later."
+                    "Error encountered while using Gemini API to grade IAQ "
+                    f"disclosures for {code}. "
+                    "This may be due to rate limits—please try again later."
                 )
                 st.warning(msg, icon="⚠️")
             else:
                 st.warning(exc, icon="⚠️")
+        except genai.errors.ServerError:
+            msg = "Server error from Gemini API. Please retry later."
+            st.warning(msg, icon="⚠️")
         else:
             st.success(f"IR contacts updated for {code}!")
 
     # Reset session state
-    del st.session_state.ir_contacts_df
-    del st.session_state.control_df
+    load_control_df()
+    if "selected_stock_code" in st.session_state:
+        st.session_state.ir_contacts_df = load_ir_contacts(
+            stock_code=st.session_state.selected_stock_code
+        )
 
 
 # --------------------------------- Download --------------------------------- #
-def load_llm_logs_df():
+def load_llm_logs() -> pd.DataFrame:
     """
-    Load llm_logs table from database to session state
+    Load llm_logs table from database
     """
-    st.session_state.llm_logs_df = db_conn.query(
-        "SELECT id, stock_code, prompt, response, "
-        "citations, created_at "
-        "FROM llm_logs ORDER BY created_at",
-        ttl=15,
+    response = (
+        supabase.table("llm_logs").select("*").order("created_at", desc=True).execute()
     )
+    df = pd.DataFrame(response.data)
+
+    # convert datetime fields
+    if not df.empty:
+        datetime_columns = ["created_at"]
+        for col in datetime_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
+                # Localize to Asia/Hong_Kong
+                df[col] = df[col].dt.tz_localize(
+                    "Asia/Hong_Kong", ambiguous="raise", nonexistent="raise"
+                )
+    return df
 
 
 def write_to_excel():
@@ -1287,10 +1317,10 @@ def write_to_excel():
     # List of dataframes
     dfs = [
         st.session_state.control_df,
-        st.session_state.esg_filings_df,
-        st.session_state.iaq_gradings_df,
-        st.session_state.ir_contacts_df,
-        st.session_state.llm_logs_df,
+        load_esg_filings(stock_code=None),
+        load_iaq_gradings(stock_code=None),
+        load_ir_contacts(stock_code=None),
+        load_llm_logs(),
     ]
     df_names = [
         "Control",
@@ -1304,12 +1334,25 @@ def write_to_excel():
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         for df, name in zip(dfs, df_names):
+            df_to_export = df.copy()
+
+            for col in df_to_export.columns:
+                # Check if the column dtype is a timezone-aware datetime
+                if (
+                    pd.api.types.is_datetime64_any_dtype(df_to_export[col])
+                    and df_to_export[col].dt.tz is not None
+                ):
+                    # Convert to timezone-unaware (naive) datetime
+                    df_to_export[col] = df_to_export[col].dt.tz_localize(None)
+
             # Convert id column to int
-            df["id"] = df["id"].astype("Int64").fillna(pd.NA)
-            # Sort dataframe by id
-            df = df.sort_values(by="id")
-            # Write to Excel
-            df.to_excel(writer, sheet_name=name, index=False)
+            if "id" in df_to_export.columns:
+                df_to_export["id"] = df_to_export["id"].astype("Int64").fillna(pd.NA)
+                # Sort dataframe by id
+                df_to_export = df_to_export.sort_values(by="id")
+
+            # Write the modified dataframe to Excel
+            df_to_export.to_excel(writer, sheet_name=name, index=False)
     output.seek(0)
     return output
 
@@ -1317,59 +1360,75 @@ def write_to_excel():
 # ---------------------------------------------------------------------------- #
 #                                     Main                                     #
 # ---------------------------------------------------------------------------- #
-# Show app title and description
 st.set_page_config(page_title="HK ListCo IAQ Tracker", page_icon=":material/aq_indoor:")
 st.title(":material/aq_indoor: Hong Kong ListCo IAQ Tracker")
 st.write(
     """
-    Track Indoor Air Quality (IAQ) disclosures in ESG reports for Hong Kong
-    Stock Exchange (HKEx)-listed companies.
-    Key features include:
-    - Maintain a wishlist of stock codes for monitoring.
-    - Automatically fetch and update the latest ESG filings from HKEx.
-    - Access AI-generated grading reports on IAQ disclosures.
-    - Extract Investor Relations (IR) contact details via AI for outreach.
-    - Export data to Excel for further analysis and reporting.
+    This tool helps you monitor and analyze Indoor Air Quality (IAQ) disclosures
+    in the ESG reports of Hong Kong-listed companies.
+
+    **Key Features:**
+    *   **Dashboard:** Manage your watchlist of companies, see their AI-generated IAQ grades, and track when their data was last refreshed.
+    *   **Company Profiles:** Select a company to dive deeper and view its key data, including:
+        *   **ESG Filings:** Pull the latest ESG filings directly from the HKEx website.
+        *   **IAQ Grading:** Generate a detailed report and grade on the company's IAQ disclosure quality with AI.
+        *   **IR Contacts:** Use AI to find and extract up-to-date Investor Relations contacts.
+        *   **Outreach Email:** Draft a professional outreach email based on the aforementioned data.
+    *   **Bulk Updates:** Save time by refreshing ESG filings and IR contacts for multiple companies at once.
+    *   **Data Export:** Download your entire dataset, including dashboard, ESG filings, IAQ gradings, IR contacts, and AI logs, to a single Excel file.
     """
 )
 st.divider()
 
 
 # ---------------------------------- Control --------------------------------- #
-st.subheader("Summary of Tracked Stock Codes")
+st.subheader("Dashboard")
 st.write(
     """
-    Review your tracked stock codes at a glance, including:
-    - AI-assigned IAQ disclosure grades.
-    - Last update dates for ESG filings, IAQ gradings, and IR contacts.
+    This is your central dashboard. Add companies you want to monitor to the watchlist,
+    see their latest IAQ grade, and check when their data was last refreshed.
+    Toggle the 'Edit Mode' button to switch between Display and Edit Mode.
+
+    **Display Mode:** Your main view for browsing and selecting companies.
+    - **Select a company:** Select the checkbox next to the row to load its detailed profile in the next section.
+    - **Sort data:** Click on a column header to sort the table by that column.
+
+    **Edit Mode:** Your view for managing your watchlist.
+    - **Add a company:** Scroll to the bottom and fill the blank row at the bottom with a 5-digit stock code (e.g., 00005). The company name is optional and will be auto-populated when you fetch its ESG filings.
+    - **Edit a cell:** Double-click any cell to make changes, then press the `Enter` key or click away to confirm.
+    - **Delete a company:** Select the checkbox next to the row and press the `Delete` key.
+    - Click **"Save Changes"** below to apply all your edits to the database.
     """
-)
-st.info(
-    """
-    ⭐ Tips:
-    - Toggle "Edit" off to sort columns.
-    - Toggle "Edit" on to modify stock codes, company names, or IAQ grades.
-    - Add rows by filling the blank row at the bottom (stock codes must be 5 digits, e.g., 00001).
-    - Delete rows by selecting the checkbox and pressing Delete.
-    - Edit cells by double-clicking, then press Enter/Tab or click away.
-    - Click "Save Changes" to apply all edits.
-    """,
 )
 
 # init control dataframe and edit_control
 if "control_df" not in st.session_state:
     load_control_df()
-if "edit_control" not in st.session_state:
-    st.session_state.edit_control = False
+if "control_toggle" not in st.session_state:
+    st.session_state.control_toggle = False
 
-edit_control = st.toggle("Edit Mode", key="edit_control")
+# display edit control toggle
+edit_control = st.toggle("Edit Mode", key="control_toggle")
+
+# show dataframe in display mode
 if not edit_control:
-    st.dataframe(
+    # user to select a stock code
+    selected_row = st.dataframe(
         st.session_state.control_df,
         use_container_width=True,
         hide_index=True,
         column_config={"id": None},
+        on_select="rerun",
+        selection_mode="single-row",
     )
+    # save selected stock code to session state
+    if selected_row["selection"]["rows"]:
+        st.session_state.selected_stock_code = st.session_state.control_df.iloc[
+            selected_row["selection"]["rows"][0]
+        ]["stock_code"]
+
+
+# show data editor in edit mode
 else:
     st.data_editor(
         st.session_state.control_df,
@@ -1397,246 +1456,375 @@ else:
 st.divider()
 
 
-# -------------------------------- ESG Filings ------------------------------- #
-st.subheader("ESG Filings")
-st.write(
-    """
-    Browse the latest ESG filings scraped from the HKEx website for your tracked stock codes.
-    Each entry shows the release date, title, and direct URL for quick access.
-    Use the form below to refresh filings.
-    """
-)
-
-# init esg_filings dataframe and edit_esg_filings
-if "esg_filings_df" not in st.session_state:
-    load_esg_filings_df()
-if "edit_esg_filings" not in st.session_state:
-    st.session_state.edit_esg_filings = False
-
-edit_esg_filings = st.toggle("Edit Mode", key="edit_esg_filings")
-if not edit_esg_filings:
-    st.dataframe(
-        st.session_state.esg_filings_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"id": None},
-    )
+# # ------------------------------ Company Profile ----------------------------- #
+if "selected_stock_code" not in st.session_state:
+    st.subheader("Company Profile")
+    st.info("Select a stock code from dashboard to view its details.")
 else:
-    st.data_editor(
-        st.session_state.esg_filings_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id": None,
-            "stock_code": st.column_config.TextColumn(
-                max_chars=5,
-                validate=r"^\d{5}$",
-                required=True,
-            ),
-            "release_time": st.column_config.DatetimeColumn(
-                required=True,
-            ),
-            "title": st.column_config.TextColumn(
-                required=True,
-            ),
-            "url": st.column_config.TextColumn(
-                required=True,
-            ),
-        },
-        disabled=[
-            "created_at",
-        ],
-        key="esg_filings_key",
-        num_rows="dynamic",
-    )
-    st.button("Save Changes", type="primary", on_click=edit_esg_filings_df)
-
-with st.form("esg_filings_form"):
-    update_threshold_weeks = st.number_input(
-        label=(
-            "Refresh filings older than this many weeks "
-            "(e.g., enter 12 for updates older than 3 months):"
-        ),
-        min_value=0,
-        value=12,
-    )
-    submitted = st.form_submit_button(
-        "Refresh Now",
-        type="primary",
-        on_click=update_esg_filings_df,
-        kwargs={"weeks": update_threshold_weeks},
-    )
-
-st.divider()
-
-
-# ------------------------------- IAQ Grading ------------------------------- #
-st.subheader("IAQ Grading Report")
-st.write(
-    "View and edit AI-generated grading reports evaluating IAQ disclosures"
-    "in ESG filings. Select a stock code below to get started."
-)
-
-
-# Ask for stock code
-selected_stock_code = st.selectbox(
-    "Select a stock code to view its IAQ grading report 👇",
-    sorted(st.session_state.control_df["stock_code"].unique()),
-    key="selected_stock_code",
-)
-
-# Get iaq_grading by stock code
-if st.button("Load Report", type="primary"):
-    load_iaq_grading(selected_stock_code)
-
-if "iaq_grading" in st.session_state:
-    if not st.session_state.iaq_grading.empty:
-        # Compile data
-        data = st.session_state.iaq_grading.iloc[0]
-        # Define keys based on selected stock code
-        with st.form("iaq_grading_form"):
-            st.text_input(
-                "IAQ Grade",
-                value=data.get("iaq_grade", ""),
-                key=f"grade_{selected_stock_code}",
-            )
-            st.text_area(
-                "Company Overview",
-                value=data.get("overview", ""),
-                height=150,
-                key=f"overview_{selected_stock_code}",
-            )
-            st.text_area(
-                "Justification",
-                value=data.get("justification", ""),
-                height=200,
-                key=f"justification_{selected_stock_code}",
-            )
-            st.text_area(
-                "Extracts",
-                value=data.get("extracts", ""),
-                height=400,
-                key=f"extracts_{selected_stock_code}",
-            )
-            st.form_submit_button(
-                "Save Changes",
-                type="primary",
-                on_click=edit_iaq_grading,
-                kwargs={"stock_code": selected_stock_code},
-            )
+    # init session state variables if changes in selected stock code
+    if ("prev_selected_stock_code" not in st.session_state) or (
+        st.session_state.selected_stock_code
+        != st.session_state.prev_selected_stock_code
+    ):
+        # reload dataframes
+        load_tabs()
+        # reload company name
+        st.session_state.selected_company_name = get_company_name(
+            stock_code=st.session_state.selected_stock_code
+        )
+        # reset email body and email
+        if "email_content" in st.session_state:
+            del st.session_state.email_content
+        if "email" in st.session_state:
+            del st.session_state.email
+        # update prev_selected_stock_code
+        st.session_state.prev_selected_stock_code = st.session_state.selected_stock_code
+    # rewrite subheader
+    if (
+        "selected_company_name" in st.session_state
+        and st.session_state.selected_company_name
+    ):
+        st.subheader(
+            f"Company Profile: {st.session_state.selected_company_name} ({st.session_state.selected_stock_code})"
+        )
     else:
+        st.subheader(f"Company Profile: {st.session_state.selected_stock_code}")
+
+    # init navigation bar
+    tab_lst = ["ESG Filings", "IAQ Grading", "IR Contacts", "Outreach Email"]
+    active_tab = st.radio("", tab_lst, horizontal=True, key="active_tab")
+    # Tab 1: ESG Filings
+    if active_tab == tab_lst[0]:
         st.write(
-            f"No IAQ grading report found for {selected_stock_code}. Generate one below!"
+            "Review the official ESG reports and announcements for this company, fetched directly from HKEx and sorted by the most recent date."
         )
 
-    # Generate/Update IAQ Grading
-    st.info(
+        if st.session_state.esg_filings_df.empty:
+            st.info(
+                f"No ESG filings are currently stored for {st.session_state.selected_stock_code}. Fetch latest filings from HKEx below!"
+            )
+            st.button(
+                "Fetch Filings",
+                type="primary",
+                key="fetch_esg_filings_when_empty",
+                on_click=update_esg_filings_df,
+                kwargs={
+                    "stock_codes": [st.session_state.selected_stock_code],
+                },
+            )
+        else:
+            # init esg_filings_toggle
+            if "esg_filings_toggle" not in st.session_state:
+                st.session_state.esg_filings_toggle = False
+            # display edit esg_filings toggle
+            edit_esg_filings = st.toggle("Edit Mode", key="esg_filings_toggle")
+
+            if not edit_esg_filings:
+                st.dataframe(
+                    st.session_state.esg_filings_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"id": None},
+                )
+                st.button(
+                    "Refresh Filings",
+                    type="primary",
+                    key="fetch_esg_filings",
+                    on_click=update_esg_filings_df,
+                    kwargs={
+                        "stock_codes": [st.session_state.selected_stock_code],
+                    },
+                )
+            else:
+                st.data_editor(
+                    st.session_state.esg_filings_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "id": None,
+                        "stock_code": st.column_config.TextColumn(
+                            max_chars=5,
+                            validate=r"^\d{5}$",
+                            required=True,
+                        ),
+                        "release_time": st.column_config.DatetimeColumn(
+                            required=True,
+                        ),
+                        "title": st.column_config.TextColumn(
+                            required=True,
+                        ),
+                        "url": st.column_config.TextColumn(
+                            required=True,
+                        ),
+                    },
+                    disabled=[
+                        "created_at",
+                    ],
+                    key="esg_filings_key",
+                    num_rows="dynamic",
+                )
+                st.button("Save Changes", type="primary", on_click=edit_esg_filings_df)
+
+    # Tab 2: IAQ Grading
+    elif active_tab == tab_lst[1]:
+        st.write("""
+            Access the AI-generated report that grades the company's IAQ disclosure quality based on the filings in the previous tab.
+
+            ⭐ **Tips:** For the most accurate assessment, refresh the filings first if they seem outdated.
+        """)
+
+        if st.session_state.iaq_gradings_df.empty:
+            st.info(
+                f"No IAQ grading report is currently stored for {st.session_state.selected_stock_code}. Generate one below!"
+            )
+        else:
+            # Compile data
+            data = st.session_state.iaq_gradings_df.iloc[0]
+
+            # Flag if report is outdated
+            if (
+                data.get("updated_at")
+                < st.session_state.esg_filings_df.iloc[0]["release_time"]
+            ):
+                st.info(
+                    "⚠️ Report Outdated: Newer ESG filings have been fetched since this IAQ report was generated. Regenerate the report to include the latest data in the analysis.",
+                )
+
+            # Define keys based on selected stock code
+            with st.form("iaq_grading_form"):
+                st.text_input(
+                    "IAQ Grade",
+                    value=data.get("iaq_grade", ""),
+                    key=f"grade_{st.session_state.selected_stock_code}",
+                )
+                st.text_area(
+                    "Company Overview",
+                    value=data.get("overview", ""),
+                    height=150,
+                    key=f"overview_{st.session_state.selected_stock_code}",
+                )
+                st.text_area(
+                    "Justification",
+                    value=data.get("justification", ""),
+                    height=200,
+                    key=f"justification_{st.session_state.selected_stock_code}",
+                )
+                st.text_area(
+                    "Extracts",
+                    value=data.get("extracts", ""),
+                    height=400,
+                    key=f"extracts_{st.session_state.selected_stock_code}",
+                )
+                st.form_submit_button(
+                    "Save Changes",
+                    type="primary",
+                    on_click=edit_iaq_grading,
+                    kwargs={"stock_code": st.session_state.selected_stock_code},
+                )
+
+        # Generate/Update IAQ Grading
+        st.button(
+            label="Generate Report"
+            if st.session_state.iaq_gradings_df.empty
+            else "Regenerate Report",
+            type="primary",
+            on_click=update_iaq_grading,
+            kwargs={
+                "stock_code": st.session_state.selected_stock_code,
+            },
+        )
+
+    # Tab 3: IR Contacts
+    elif active_tab == "IR Contacts":
+        st.write(
+            "Find and manage the Investor Relations contact details needed for your outreach efforts."
+        )
+
+        if st.session_state.ir_contacts_df.empty:
+            st.info(
+                f"No IR contacts are currently stored for {st.session_state.selected_stock_code}. Fetch contacts below!"
+            )
+            st.button(
+                "Fetch Contacts",
+                type="primary",
+                key="fetch_ir_contacts_when_empty",
+                on_click=update_ir_contacts_df,
+                kwargs={"stock_codes": [st.session_state.selected_stock_code]},
+            )
+        else:
+            # init ir_contacts_toggle
+            if "ir_contacts_toggle" not in st.session_state:
+                st.session_state.ir_contacts_toggle = False
+            # display edit ir_contacts toggle
+            edit_ir_contacts = st.toggle("Edit Mode", key="ir_contacts_toggle")
+
+            if not edit_ir_contacts:
+                st.dataframe(
+                    st.session_state.ir_contacts_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"id": None},
+                )
+                st.button(
+                    "Refresh Contacts",
+                    type="primary",
+                    key="fetch_ir_contacts",
+                    on_click=update_ir_contacts_df,
+                    kwargs={"stock_codes": [st.session_state.selected_stock_code]},
+                )
+            else:
+                st.data_editor(
+                    st.session_state.ir_contacts_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "id": None,
+                        "stock_code": st.column_config.TextColumn(
+                            max_chars=5,
+                            validate=r"^\d{5}$",
+                            required=True,
+                        ),
+                        "email": st.column_config.TextColumn(
+                            validate=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+                            required=False,
+                        ),
+                    },
+                    disabled=[
+                        "created_at",
+                    ],
+                    key="ir_contacts_key",
+                    num_rows="dynamic",
+                )
+                st.button("Save Changes", type="primary", on_click=edit_ir_contacts_df)
+
+    # Tab 4: Outreach Email
+    elif active_tab == "Outreach Email":
+        st.write(
+            """
+        Draft a professional outreach email based on data from the previous tabs and
+        generate a .eml file. Use AI to autofill the content for a first draft.
+
+        ⭐ **Tips:** The email content is temporary and will not be saved. To keep a copy, please generate and download the email as a .eml file.
         """
-        ⭐ Tips: The AI uses only the 20 most recent ESG filings stored in the table above.
-        If filings seem outdated, refresh them first before generating a report.
-        """,
-    )
-    st.button(
-        label="Generate Report"
-        if st.session_state.iaq_grading.empty
-        else "Regenerate Report",
-        type="primary",
-        on_click=update_iaq_grading,
-        kwargs={
-            "stock_code": selected_stock_code,
-        },
-    )
+        )
+
+        if "email_content" not in st.session_state:
+            st.session_state.email_content = ""
+
+        # set up email form
+        with st.form("email_form"):
+            st.text_input(
+                "To",
+                value=st.session_state.ir_contacts_df["email"]
+                .dropna()
+                .str.cat(sep=", ")
+                if not st.session_state.ir_contacts_df.empty
+                else "",
+                key="email_contacts",
+            )
+            st.text_input(
+                "Subject",
+                value=f"Enhancing ESG Disclosures on Indoor Air Quality: A Partnership Opportunity with {st.secrets.NGO_NAME}",
+                key="email_subject",
+            )
+            st.text_area(
+                "Content",
+                key="email_content",
+            )
+
+            col1, col2, _ = st.columns([0.25, 0.25, 0.5])
+            with col1:
+                st.form_submit_button(
+                    "Autofill Content",
+                    type="secondary",
+                    on_click=draft_email,
+                    use_container_width=True,
+                )
+            with col2:
+                submitted = st.form_submit_button(
+                    "Generate Email", type="primary", use_container_width=True
+                )
+            if submitted:
+                st.session_state.email = generate_email()
+                st.session_state.email_filename = f"""Outreach___{st.session_state.selected_stock_code}___{
+                    datetime.now(
+                        tz=pytz.timezone('Asia/Hong_Kong')
+                    ).strftime(
+                        '%Y%m%d%H%M%S'
+                    )
+                }.eml"""
+                st.success("Email generated! Ready for download.")
+        if "email" in st.session_state:
+            st.download_button(
+                label="Download Email",
+                data=st.session_state.email,
+                file_name=st.session_state.email_filename,
+                mime="message/rfc822",
+                icon=":material/download:",
+            )
 
 st.divider()
 
 
-# -------------------------------- IR Contacts ------------------------------- #
-st.subheader("Investor Relations Contacts")
+# ------------------------------- Bulk Updates ------------------------------- #
+st.subheader("Bulk Updates")
 st.write(
     """
-    View AI-extracted IR contact details for your tracked stock codes,
-    sourced from official company websites and filings.
-    Refresh contacts using the form below to capture any updates.
+    Save time by refreshing ESG filings and IR contacts for multiple companies at once.
+    This tool will find all companies in your watchlist that haven't been updated
+    within your chosen timeframe and refresh their data.
     """
 )
-st.info(
-    """
-    ⭐ Tips: This feature uses the Gemini 2.5 Pro model, which has rate limits.
-    If an update fails, wait a few minutes and retry.
-    """,
-)
 
-
-# init ir_contacts dataframe and edit_ir_contacts
-if "ir_contacts_df" not in st.session_state:
-    load_ir_contacts_df()
-if "edit_ir_contacts" not in st.session_state:
-    st.session_state.edit_ir_contacts = False
-
-edit_ir_contacts = st.toggle("Edit Mode", key="edit_ir_contacts")
-if not edit_ir_contacts:
-    st.dataframe(
-        st.session_state.ir_contacts_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={"id": None},
-    )
-else:
-    st.data_editor(
-        st.session_state.ir_contacts_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id": None,
-            "stock_code": st.column_config.TextColumn(
-                max_chars=5,
-                validate=r"^\d{5}$",
-                required=True,
-            ),
-            "email": st.column_config.TextColumn(
-                validate=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
-                required=False,
-            ),
-        },
-        disabled=[
-            "created_at",
-        ],
-        key="ir_contacts_key",
-        num_rows="dynamic",
-    )
-    st.button("Save Changes", type="primary", on_click=edit_ir_contacts_df)
-
-with st.form("ir_contacts_form"):
-    update_threshold_weeks = st.number_input(
-        label=(
-            "Refresh contacts older than this many weeks "
-            "(e.g., enter 12 for updates older than 3 months):"
-        ),
+with st.form("bulk_update_form"):
+    weeks = st.number_input(
+        label=("Refresh data for companies not updated in the last (weeks):"),
         min_value=0,
         value=12,
     )
-    submitted = st.form_submit_button(
-        "Refresh Now",
-        type="primary",
-        on_click=update_ir_contacts_df,
-        kwargs={"weeks": update_threshold_weeks},
-    )
+
+    col1, col2, _ = st.columns([0.25, 0.25, 0.5])
+    with col1:
+        st.form_submit_button(
+            "Fetch Filings",
+            type="primary",
+            on_click=update_esg_filings_df,
+            kwargs={
+                "stock_codes": get_stock_codes_tbu(
+                    update_filings=True,
+                    update_before=datetime.now(pytz.UTC) - timedelta(weeks=int(weeks)),
+                )
+            },
+            use_container_width=True,
+        )
+    with col2:
+        st.form_submit_button(
+            "Fetch Contacts",
+            type="primary",
+            on_click=update_ir_contacts_df,
+            kwargs={
+                "stock_codes": get_stock_codes_tbu(
+                    update_contacts=True,
+                    update_before=datetime.now(pytz.UTC) - timedelta(weeks=int(weeks)),
+                )
+            },
+            use_container_width=True,
+        )
 
 st.divider()
 
 
 # --------------------------------- Download --------------------------------- #
-st.subheader("Export Data")
+st.subheader("Data Export")
 st.write(
     """
-    Download the complete dataset as an Excel file, including summaries, ESG filings,
-    IAQ gradings, IR contacts, and AI interaction logs.
+    Download your entire dataset to a single Excel file.
+    This includes your dashboard watchlist, all collected ESG filings, IAQ gradings,
+    IR contacts, and the AI interaction (LLM) logs.
     """
 )
 
 if st.button("Generate Excel", type="primary"):
-    load_iaq_gradings_df()
-    load_llm_logs_df()
     excel_output = write_to_excel()
     st.session_state.excel_data = excel_output.getvalue()
     st.session_state.excel_filename = f"""ListCo IAQ tracker__{
