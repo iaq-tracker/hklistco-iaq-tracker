@@ -44,6 +44,8 @@ st.markdown(
             flex-direction: row;
             border-bottom: 1px solid rgba(255, 255, 255, 0.2);
             margin-bottom: 20px;
+            flex-wrap: nowrap;
+            overflow-x: auto;
         }
         /* Hide radio circles */
         div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > div:first-child {
@@ -54,12 +56,13 @@ st.markdown(
             padding: 10px 20px;
             border: 1px solid rgba(255, 255, 255, 0.2);
             border-bottom: none;
-            background-color: var(--secondary-background-color, #333333); /* Fallback to dark gray */
-            color: var(--text-color, #ffffff); /* Fallback to white */
+            background-color: var(--secondary-background-color, #333333);
+            color: var(--text-color, #ffffff);
             cursor: pointer;
             margin-right: -1px;
             border-radius: 4px 4px 0 0;
             transition: background-color 0.3s;
+            white-space: nowrap;
         }
         /* Hover effect for unselected tabs */
         div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > div:hover {
@@ -67,9 +70,9 @@ st.markdown(
         }
         /* Selected tab: Force primary color */
         div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] > input[type="radio"]:checked + div {
-            background-color: var(--primary-color, #ff4b4b) !important; /* Fallback to red */
+            background-color: var(--primary-color, #ff4b4b) !important;
             border-bottom: 1px solid var(--primary-color, #ff4b4b) !important;
-            color: #ffffff !important; /* White for contrast */
+            color: #ffffff !important;
             font-weight: bold;
         }
     </style>
