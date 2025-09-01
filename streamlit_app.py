@@ -32,6 +32,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 from supabase import create_client
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 
 # -------------------------- CSS for Navigation Bar -------------------------- #
@@ -773,9 +774,9 @@ def format_contacts(
 
 # ----------------------------------- Email ---------------------------------- #
 def draft_email():
-    '''
+    """
     Generate email content with AI.
-    '''
+    """
     prompt = f"""Imagine you represent an ESG consultant from the Hong Kong-based NGO ({st.secrets.NGO_URL}). Draft a professional introduction email to the Investor Relations (IR) department of the company with a stock ticker of '{st.session_state.selected_stock_code}'"""
 
     if (
@@ -811,9 +812,9 @@ def draft_email():
 
 
 def generate_email():
-    '''
+    """
     Generate .eml file.
-    '''
+    """
     custom_policy = default.clone(max_line_length=0, linesep="\r\n")
 
     # Create .eml file content with custom policy
@@ -925,9 +926,9 @@ def edit_control_df():
 
 
 def get_company_name(stock_code: str) -> str | None:
-    '''
+    """
     Get company name from control table.
-    '''
+    """
     condition = st.session_state.control_df["stock_code"] == stock_code
     result_df = st.session_state.control_df[condition][["name"]]
     return result_df["name"].iloc[0] if not result_df.empty else None
