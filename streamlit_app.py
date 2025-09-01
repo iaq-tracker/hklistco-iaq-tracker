@@ -246,7 +246,7 @@ def get_earliest_release_time(driver: webdriver.Chrome) -> datetime | None:
         By.CSS_SELECTOR,
         "#titleSearchResultPanel table tbody tr",
     )
-    if result_rows is not None:
+    if result_rows:
         last_row = result_rows[-1]
         last_row_cells = last_row.find_elements(By.TAG_NAME, "td")
         earliest_release_time_str = last_row_cells[0].text
