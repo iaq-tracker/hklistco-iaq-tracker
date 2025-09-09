@@ -645,6 +645,9 @@ def search_contacts(
     NOTE: As of 5 Aug 2025, it is not possible to configure a single Gemini API call
     to simultaneously use a grounding tool and enforce a structured JSON output.
     See: https://github.com/googleapis/python-genai/issues/665
+    NOTE: As of 9 Sep 2025, Grounding with Google Search for Gemini 2.5 Pro (free tier) 
+    is not supported.
+    See: https://ai.google.dev/gemini-api/docs/pricing#standard
     """
     # Filter control_df for the given stock_code and get name
     condition = st.session_state.control_df["stock_code"] == stock_code
@@ -669,7 +672,7 @@ def search_contacts(
     # Send prompt
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     response = client.models.generate_content(
-        model="gemini-2.5-pro",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[grounding_tool],
