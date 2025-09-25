@@ -1378,7 +1378,7 @@ st.write(
     *   **Dashboard:** Manage your watchlist of companies, see their AI-generated IAQ grades, and track when their data was last refreshed.
     *   **Company Profiles:** Select a company to dive deeper and view its key data, including:
         *   **ESG Filings:** Pull the latest ESG filings directly from the HKEx website.
-        *   **IAQ Grading:** Generate a detailed report and grade on the company's IAQ disclosure quality with AI.
+        *   **IAQ Grading:** Generate a detailed report and grade on the company's IAQ disclosure quality with AI, evaluating a) length and detail, b) use of KPIs, c) consistency, and d) progression.
         *   **IR Contacts:** Use AI to find and extract up-to-date Investor Relations contacts.
         *   **Outreach Email:** Draft a professional outreach email based on the aforementioned data.
     *   **Bulk Updates:** Save time by refreshing ESG filings and IR contacts for multiple companies at once.
@@ -1579,6 +1579,15 @@ else:
 
             ⭐ **Tips:** For the most accurate assessment, refresh the filings first if they seem outdated.
         """)
+
+        with st.expander("View Evaluation Criteria"):
+            st.markdown("""
+            The AI grades the company's IAQ disclosures based on the following criteria:
+            - **Length and Detail:** Short/vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
+            - **Key Performance Indicators (KPIs):** Presence of quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
+            - **Consistency:** How regularly KPIs are reported over time; improvements or expansions in disclosure (e.g., adding new metrics or deeper analysis in recent years).
+            - **Progression:** Emphasis on the last three years to assess if disclosure has improved.
+            """)
 
         if st.session_state.iaq_gradings_df.empty:
             st.info(

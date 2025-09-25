@@ -165,6 +165,7 @@ cython_debug/
 
 # pre-commit
 .pre-commit-config.yaml
+.ruff_cache
 
 # load data
 esg_filings.xlsx
