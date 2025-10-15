@@ -1049,7 +1049,7 @@ def load_control_df():
     """
     Load ir_contacts table from database to session state
     """
-    response = supabase.table("control").select("*").order("market_cap").execute()
+    response = supabase.table("control").select("*").order("market_cap", desc=True).execute()
     df = pd.DataFrame(response.data)
 
     # convert datetime fields
