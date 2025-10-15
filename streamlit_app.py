@@ -1118,6 +1118,9 @@ def edit_control_df():
         codes_to_delete = [
             control_df.iloc[row_idx]["stock_code"] for row_idx in deleted_rows
         ]
+        supabase.table("iaq_gradings").delete().in_(
+            "stock_code", codes_to_delete
+        ).execute()
         supabase.table("control").delete().in_("stock_code", codes_to_delete).execute()
 
     # Reset edit_control toggle
