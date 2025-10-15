@@ -1820,6 +1820,7 @@ else:
             if pd.notna(data.get("last_updated_market_cap_at"))
             else "N/A",
         )
+        st.caption("Note: HKEx calculates market cap based on HKEx-listed shares only which may not reflect the company's total global market capitalization (e.g., for H-shares, Depositary Receipts (DRs), or dual-listed companies).")
 
         st.button(
             "Refresh Basics",
