@@ -18,6 +18,12 @@ from dateutil import parser
 from google import genai
 from google.genai import types
 import pandas as pd
+from pandas.api.types import (
+    is_categorical_dtype,
+    is_datetime64_any_dtype,
+    is_numeric_dtype,
+    is_object_dtype,
+)
 from pydantic import BaseModel
 import pytz
 import sqlalchemy.exc
@@ -126,21 +132,27 @@ class Grade(BaseModel):
 # ---------------------------------------------------------------------------- #
 def get_stock_codes_tbu(
     *,
+    update_market_cap: bool = False,
     update_filings: bool = False,
     update_contacts: bool = False,
     update_before: datetime | None = None,
 ) -> list[str]:
     """
-    Get list of stock codes for which ESG filings or IR contacts require updating.
+    Get list of stock codes for which company basics, ESG filings, or IR contacts require updating.
     Optional: set update_before to get stock codes updated before a specific date
     """
     # Validate inputs
-    if not (update_filings or update_contacts):
-        msg = "Either update_filings or update_contacts must be True"
+    if not (update_market_cap or update_filings or update_contacts):
+        msg = "At least one of update_market_cap, update_filings, or update_contacts must be True"
         raise ValueError(msg)
 
     # Determine the field to filter
-    field = "last_updated_filings_at" if update_filings else "last_updated_contacts_at"
+    if update_market_cap:
+        field = "last_updated_market_cap_at"
+    elif update_filings:
+        field = "last_updated_filings_at"
+    else:
+        field = "last_updated_contacts_at"
 
     # Create condition to select rows where field is NULL
     condition = st.session_state.control_df[field].isna()
@@ -223,6 +235,171 @@ def embed_citations(response: types.GenerateContentResponse) -> str:
                 citation_string = "\n".join(citation_links)
                 text = text[:end_index] + citation_string + text[end_index:]
     return text
+
+
+def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds a UI on top of a dataframe to let viewers filter columns.
+    """
+    modify = st.checkbox("Add Filters")
+    if not modify:
+        return df
+    df = df.copy()
+    # Try to convert datetimes into a standard format (datetime, no timezone)
+    for col in df.columns:
+        if is_object_dtype(df[col]):
+            try:
+                df[col] = pd.to_datetime(df[col])
+            except Exception:
+                pass
+        if is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.tz_localize(None)
+    modification_container = st.container()
+    with modification_container:
+        to_filter_columns = st.multiselect("Filter dataframe on", df.columns)
+        for column in to_filter_columns:
+            left, right = st.columns((1, 20))
+            # Treat columns with < 10 unique values as categorical
+            if is_categorical_dtype(df[column]) or df[column].nunique() < 10:
+                user_cat_input = right.multiselect(
+                    f"Values for {column}",
+                    df[column].unique(),
+                    default=list(df[column].unique()),
+                )
+                df = df[df[column].isin(user_cat_input)]
+            elif is_numeric_dtype(df[column]):
+                _min = float(df[column].min())
+                _max = float(df[column].max())
+                step = (_max - _min) / 100
+                user_num_input = right.slider(
+                    f"Values for {column}",
+                    min_value=_min,
+                    max_value=_max,
+                    value=(_min, _max),
+                    step=step,
+                )
+                df = df[df[column].between(*user_num_input)]
+            elif is_datetime64_any_dtype(df[column]):
+                user_date_input = right.date_input(
+                    f"Values for {column}",
+                    value=(
+                        df[column].min(),
+                        df[column].max(),
+                    ),
+                )
+                if len(user_date_input) == 2:
+                    user_date_input = tuple(map(pd.to_datetime, user_date_input))
+                    start_date, end_date = user_date_input
+                    df = df.loc[df[column].between(start_date, end_date)]
+            else:
+                user_text_input = right.text_input(
+                    f"Substring or regex in {column}",
+                )
+                if user_text_input:
+                    df = df[df[column].astype(str).str.contains(user_text_input)]
+    return df
+
+
+def normalize_market_cap(market_cap_str: str) -> float:
+    """
+    Converts a market cap string (e.g., "HK$1,234.5B" or "567.8M")
+    into a float representing the value in billions.
+
+    Args:
+        market_cap_str: The market cap string from the website.
+
+    Returns:
+        The market cap value in billions as a float.
+    """
+    # Clean the string: remove currency, commas, and whitespace
+    match = re.search(r"([\d,]+\.?\d*)\s*([BM])", market_cap_str.upper())
+    if not match:
+        raise ValueError(f"Could not parse market cap string: '{market_cap_str}'")
+
+    # Convert the numeric part to a float
+    value_str, suffix = match.groups()
+    value = float(value_str.replace(",", ""))
+
+    # Convert to billions if necessary
+    if suffix == "M":
+        return round(value / 1000, 2)
+    if suffix == "B":
+        return round(value, 2)
+    return 0.00
+
+
+def get_company_basics(
+    stock_code: str,
+    *,
+    save_to_db: bool = True,
+) -> None:
+    """
+    Extract market cap
+    """
+    # ----------------------- Step 1 - set up chromedriver ----------------------- #
+    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    options = Options()
+    options.add_argument("--window-size=1920,1080")  # set window size
+    options.add_argument("--headless")  # headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gcm")  # disable GCM registration
+    options.add_argument("--disable-notifications")  # disable push notification
+    options.add_experimental_option(
+        "prefs",
+        {
+            "profile.default_content_setting_values.notifications": 2  # Block notifications
+        },
+    )
+    driver = webdriver.Chrome(service=service, options=options)
+
+    # ---------- Step 2: visit "Listed Company Information Title Search" --------- #
+    url = st.secrets.BASICS_URL.format(int(stock_code))
+    driver.get(url)
+
+    time.sleep(2)
+
+    company_name_element = WebDriverWait(driver, 10).until(
+        EC.visibility_of_element_located((By.CSS_SELECTOR, "h1[class='col_longname']"))
+    )
+    match = re.search(r"^(.*?)\s*\(\d+\)", company_name_element.text)
+    if match:
+        company_name = match.group(1).strip()
+    else:
+        company_name = None
+
+    hsic_element = WebDriverWait(driver, 10).until(
+        EC.visibility_of_element_located(
+            (By.CSS_SELECTOR, "span[class='col_industry_hsic']")
+        )
+    )
+    hsic: str = hsic_element.text
+    sector = hsic.split(" - ")[0]
+
+    market_cap_element = WebDriverWait(driver, 10).until(
+        EC.visibility_of_element_located((By.CSS_SELECTOR, "dt.ico_data.col_mktcap"))
+    )
+    market_cap = normalize_market_cap(market_cap_element.text)
+
+    driver.quit()
+
+    if save_to_db:
+        # add company name
+        supabase.table("control").update({"name": company_name}).eq(
+            "stock_code", stock_code
+        ).or_('name.is.null, name.eq.""').execute()
+        # add hsic
+        supabase.table("control").update({"sector": sector}).eq(
+            "stock_code", stock_code
+        ).or_('sector.is.null, sector.eq.""').execute()
+        # add market cap
+        supabase.table("control").update(
+            {
+                "market_cap": market_cap,
+                "last_updated_market_cap_at": datetime.now(pytz.UTC).isoformat(),
+            }
+        ).eq("stock_code", stock_code).execute()
 
 
 # -------------------------------- ESG Filings ------------------------------- #
@@ -309,7 +486,7 @@ def scrape(
     driver = webdriver.Chrome(service=service, options=options)
 
     # ---------- Step 2: visit "Listed Company Information Title Search" --------- #
-    url = st.secrets.URL
+    url = st.secrets.FILINGS_URL
     driver.get(url)
 
     # a) enter Stock Code
@@ -413,7 +590,6 @@ def scrape(
 
     # loop through each row
     data_lst: List[Dict[str, Union[datetime, str]]] = []
-    company_name = None
     for row in result_rows:
         cells = row.find_elements(By.TAG_NAME, "td")
         # extract and convert release_time
@@ -437,9 +613,6 @@ def scrape(
                 "url": doc_url,
             }
         )
-        # extract company name
-        if (not company_name) or (company_name == ""):
-            company_name = cells[2].text.split("\n")[0]
     # close browser
     driver.quit()
 
@@ -455,10 +628,6 @@ def scrape(
         supabase.table("control").update(
             {"last_updated_filings_at": datetime.now(pytz.UTC).isoformat()}
         ).eq("stock_code", stock_code).execute()
-        if company_name:
-            supabase.table("control").update({"name": company_name}).eq(
-                "stock_code", stock_code
-            ).is_("name", None).execute()
 
 
 # -------------------------------- IAQ Grading ------------------------------- #
@@ -603,15 +772,15 @@ def format_grading(
 
     if save_to_db and grade:
         # Add to iaq_gradings table
-        supabase.table("iaq_gradings").upsert(
+        supabase.table("iaq_gradings").insert(
             {
                 "stock_code": stock_code,
+                "grade": grade.grade,
                 "overview": grade.overview,
                 "justification": grade.justification,
                 "extracts": grade.extracts,
-                "updated_at": datetime.now(pytz.UTC).isoformat(),
+                "grading_date": datetime.now(pytz.UTC).isoformat(),
             },
-            on_conflict="stock_code",
         ).execute()
         # Update iaq_grade and last_updated_grade_at in control table
         supabase.table("control").update(
@@ -645,7 +814,7 @@ def search_contacts(
     NOTE: As of 5 Aug 2025, it is not possible to configure a single Gemini API call
     to simultaneously use a grounding tool and enforce a structured JSON output.
     See: https://github.com/googleapis/python-genai/issues/665
-    NOTE: As of 9 Sep 2025, Grounding with Google Search for Gemini 2.5 Pro (free tier) 
+    NOTE: As of 9 Sep 2025, Grounding with Google Search for Gemini 2.5 Pro (free tier)
     is not supported.
     See: https://ai.google.dev/gemini-api/docs/pricing#standard
     """
@@ -783,24 +952,53 @@ def draft_email():
     """
     Generate email content with AI.
     """
-    prompt = f"""Imagine you represent an ESG consultant from the Hong Kong-based NGO ({st.secrets.NGO_URL}). Draft a professional introduction email to the Investor Relations (IR) department of the company with a stock ticker of '{st.session_state.selected_stock_code}'"""
+    # Get IR contact names to address them in email
+    contact_names = "Sir/Madam"
+    if not st.session_state.ir_contacts_df.empty:
+        names = st.session_state.ir_contacts_df["name"].dropna().tolist()
+        if names:
+            # Filter out generic names if more specific names are available
+            specific_names = [
+                name for name in names if "department" not in name.lower()
+            ]
+            if specific_names:
+                contact_names = ", ".join(specific_names)
 
+    # Retrieve the reference email from secrets
+    reference_email = st.secrets.EMAIL_TEMPLATE
+
+    # Constuct prompt
+    prompt = f"""Imagine you are an ESG consultant from the Hong Kong-based NGO ({st.secrets.NGO_URL}). Your task is to draft a professional outreach email to {st.session_state.selected_company_name} (stock code: {st.session_state.selected_stock_code}-HK).
+
+    The email should be addressed to {contact_names}.
+
+    **Your primary goal is to secure a meeting to discuss potential collaborations on Indoor Air Quality (IAQ) initiatives.**
+
+    **Reference Email (for tone, style, and content):**
+    ---
+    {reference_email}
+    ---
+
+    **Instructions for your draft:**
+    1.  **Adopt the Tone and Style:** Mirror the professional, appreciative, and collaborative tone of the reference email.
+    2.  **Maintain Core Message:** Keep the brief introduction of CAN and the explanation of IAQ's importance for public health in Hong Kong.
+    3.  **Personalize the Opening:** Start with a polite and personalized salutation addressing {contact_names}. In the first paragraph, acknowledge the company's current IAQ disclosure status. Use the following assessment to make your opening specific and show you've done your research:
+    """
+
+    # Add the company's specific IAQ justification to the prompt if it exists
     if (
-        "selected_company_name" in st.session_state
-        and st.session_state.selected_company_name
+        f"justification_{st.session_state.selected_stock_code}" in st.session_state
+        and st.session_state[f"justification_{st.session_state.selected_stock_code}"]
     ):
-        prompt += f", {st.session_state.selected_company_name}"
+        prompt += f"\n**IAQ Assessment:** {st.session_state[f'justification_{st.session_state.selected_stock_code}']}\n"
+    else:
+        prompt += "\n**IAQ Assessment:** (No specific assessment available, make a general but positive opening remark about their ESG reporting.)\n"
 
-    if f"justification_{st.session_state.selected_stock_code}" in st.session_state:
-        prompt += f". Consider the following assessment on its disclosures with regard to IAQ: {st.session_state[f'justification_{st.session_state.selected_stock_code}']}"
-
-    prompt += """. The goal is to discuss ways to implement Indoor Air Quality (IAQ) best practices and improve
-    IAQ disclosures in their ESG reports. Key points to include:
-    - Polite introduction and context on HKEX ESG guidelines.
-    - Suggest next steps (e.g., meeting to share best practices).
-    - End with a call to action.
-
-    Draft and return the body of the email only. Keep it concise (200-300 words), professional, and positive. Do not include email subject, recipient line and signature etc.
+    # Add the remaining instructions to the prompt
+    prompt += """
+    4.  **Incorporate Key Proposals:** You MUST include the three initiatives mentioned in the reference email: Leadership Case Study, Expert Presentations and Awareness Workshops, and the ESG Award.
+    5.  **Call to Action:** End with a clear call to action, requesting a brief meeting (virtual or in-person).
+    6.  **Format:** Return ONLY the body of the email in plain text that is suitable for an email body. Do not use any markdown formatting, such as asterisks for bolding (`**text**`) or bullet points (`* text`). Write paragraphs in standard block format. Do not include the subject line, recipient line (e.g., "To:"), or signature. Keep it concise (within 400 words).
     """
 
     client = get_llm_client()
@@ -857,6 +1055,7 @@ def load_control_df():
     # convert datetime fields
     if not df.empty:
         datetime_columns = [
+            "last_updated_market_cap_at",
             "last_updated_filings_at",
             "last_updated_grade_at",
             "last_updated_contacts_at",
@@ -911,6 +1110,8 @@ def edit_control_df():
     # Add stock_codes to database based on added_rows
     if added_rows := control_key["added_rows"]:
         supabase.table("control").upsert(added_rows, on_conflict="stock_code").execute()
+        for row in added_rows:
+            get_company_basics(stock_code=row["stock_code"], save_to_db=True)
 
     # Remove deleted rows from database
     if deleted_rows := control_key["deleted_rows"]:
@@ -938,6 +1139,61 @@ def get_company_name(stock_code: str) -> str | None:
     condition = st.session_state.control_df["stock_code"] == stock_code
     result_df = st.session_state.control_df[condition][["name"]]
     return result_df["name"].iloc[0] if not result_df.empty else None
+
+
+def load_all_iaq_gradings():
+    """
+    Load all historical iaq_gradings from the database for the chart.
+    """
+    response = (
+        supabase.table("iaq_gradings")
+        .select("stock_code, grade, grading_date")
+        .execute()
+    )
+    df = pd.DataFrame(response.data)
+
+    if not df.empty:
+        df["grading_date"] = pd.to_datetime(
+            df["grading_date"], errors="coerce", utc=True
+        )
+    return df
+
+
+def prepare_chart_data() -> pd.DataFrame:
+    """
+    Loads all historical gradings and processes them to show the
+    latest grade count per year for all companies.
+    """
+    all_gradings_df = load_all_iaq_gradings()
+
+    if all_gradings_df.empty or "grading_date" not in all_gradings_df.columns:
+        return pd.DataFrame()
+
+    all_gradings_df.dropna(subset=["grading_date"], inplace=True)
+    all_gradings_df["year"] = all_gradings_df["grading_date"].dt.year
+    all_gradings_df.sort_values("grading_date", inplace=True)
+
+    latest_grades_per_year_df = all_gradings_df.drop_duplicates(
+        subset=["stock_code", "year"], keep="last"
+    )
+
+    chart_data = pd.crosstab(
+        index=latest_grades_per_year_df["year"],
+        columns=latest_grades_per_year_df["grade"],
+    )
+
+    for grade in ["Low", "Medium", "High"]:
+        if grade not in chart_data.columns:
+            chart_data[grade] = 0
+
+    return chart_data[["Low", "Medium", "High"]]
+
+
+# ---------------------------------- Basics ---------------------------------- #
+def update_basics(stock_codes: list[str]):
+    for code in stock_codes:
+        get_company_basics(stock_code=code, save_to_db=True)
+    load_control_df()
 
 
 # -------------------------------- ESG Filings ------------------------------- #
@@ -1063,12 +1319,13 @@ def load_iaq_gradings(
     if stock_code:
         q.eq("stock_code", stock_code)
 
-    response = q.order("stock_code", desc=False).execute()
+    # Sort by grading_date to show the most recent gradings first
+    response = q.order("grading_date", desc=True).execute()
     df = pd.DataFrame(response.data)
 
     # convert datetime fields
     if not df.empty:
-        datetime_columns = ["updated_at"]
+        datetime_columns = ["grading_date"]
         for col in datetime_columns:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce", utc=False)
@@ -1076,53 +1333,50 @@ def load_iaq_gradings(
                 df[col] = df[col].dt.tz_localize(
                     "Asia/Hong_Kong", ambiguous="raise", nonexistent="raise"
                 )
-        # Merge with control_df to add iaq_grade column
-        df = df.merge(
-            st.session_state.control_df[["stock_code", "iaq_grade"]],
-            on="stock_code",
-            how="left",
-        )
 
     return df
 
 
 def edit_iaq_grading(
+    grade_id: int,
     stock_code: str,
 ):
     """
-    Save changes to control and/or iaq_gradings table
+    Save changes to a specific historical record in the iaq_gradings table.
+    If the edited record is the latest one, also update the control table.
     """
-    # Fetch values from session state using keys
-    grade = st.session_state.get(f"grade_{stock_code}", "")
-    overview = st.session_state.get(f"overview_{stock_code}", "")
-    justification = st.session_state.get(f"justification_{stock_code}", "")
-    extracts = st.session_state.get(f"extracts_{stock_code}", "")
+    # Fetch values from session state using grade_id
+    grade = st.session_state.get(f"grade_{grade_id}", "")
+    overview = st.session_state.get(f"overview_{grade_id}", "")
+    justification = st.session_state.get(f"justification_{grade_id}", "")
+    extracts = st.session_state.get(f"extracts_{grade_id}", "")
 
-    # Update control if changes made to grade
-    if grade != st.session_state.iaq_gradings_df["iaq_grade"].iloc[0]:
-        supabase.table("control").update({"iaq_grade": grade}).eq(
-            "stock_code", stock_code
-        ).execute()
-        # Reload control_df from session state
-        load_control_df()
-        # Reload iaq_grading from session state
-        st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+    # Update the specific historical record in iaq_gradings table
+    supabase.table("iaq_gradings").update(
+        {
+            "grade": grade,
+            "overview": overview,
+            "justification": justification,
+            "extracts": extracts,
+        }
+    ).eq("id", grade_id).execute()
 
-    # Update iaq_gradings if changes made to overview, justification or extracts
-    if (
-        overview != st.session_state.iaq_gradings_df["overview"].iloc[0]
-        or justification != st.session_state.iaq_gradings_df["justification"].iloc[0]
-        or extracts != st.session_state.iaq_gradings_df["extracts"].iloc[0]
-    ):
-        supabase.table("iaq_gradings").update(
+    # Check if the edited grade is the most recent one.
+    latest_grade_id = st.session_state.iaq_gradings_df["id"].iloc[0]
+    if grade_id == latest_grade_id:
+        # Update the control table to keep it in sync.
+        supabase.table("control").update(
             {
-                "overview": overview,
-                "justification": justification,
-                "extracts": extracts,
+                "iaq_grade": grade,
+                "last_updated_grade_at": datetime.now(pytz.UTC).isoformat(),
             }
         ).eq("stock_code", stock_code).execute()
-        # Reload iaq_grading from session state
-        st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+        # Reload control_df to reflect the change on the main dashboard
+        load_control_df()
+
+    # After saving, force a reload of the data to show changes
+    st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+    st.success("Changes to the grading report have been saved.")
 
 
 def update_iaq_grading(
@@ -1371,42 +1625,52 @@ st.set_page_config(page_title="HK ListCo IAQ Tracker", page_icon=":material/aq_i
 st.title(":material/aq_indoor: Hong Kong ListCo IAQ Tracker")
 st.write(
     """
-    This tool helps you monitor and analyze Indoor Air Quality (IAQ) disclosures
-    in the ESG reports of Hong Kong-listed companies.
-
-    **Key Features:**
-    *   **Dashboard:** Manage your watchlist of companies, see their AI-generated IAQ grades, and track when their data was last refreshed.
-    *   **Company Profiles:** Select a company to dive deeper and view its key data, including:
-        *   **ESG Filings:** Pull the latest ESG filings directly from the HKEx website.
-        *   **IAQ Grading:** Generate a detailed report and grade on the company's IAQ disclosure quality with AI, evaluating a) length and detail, b) use of KPIs, c) consistency, and d) progression.
-        *   **IR Contacts:** Use AI to find and extract up-to-date Investor Relations contacts.
-        *   **Outreach Email:** Draft a professional outreach email based on the aforementioned data.
-    *   **Bulk Updates:** Save time by refreshing ESG filings and IR contacts for multiple companies at once.
-    *   **Data Export:** Download your entire dataset, including dashboard, ESG filings, IAQ gradings, IR contacts, and AI logs, to a single Excel file.
+    Welcome to the **Hong Kong ListCo IAQ Tracker** — an AI-powered tool that helps you monitor how Hong Kong–listed companies disclose their **Indoor Air Quality (IAQ)** information.
     """
 )
+with st.expander("Getting Started"):
+    st.markdown("""
+    **🧭 How to Navigate**
+    - **Dashboard:** View all companies in your watchlist.
+      - Click a row to open its company profile.
+      - Toggle *Manage Watchlist* to add or remove companies.
+    - **Company Profile Tabs:**
+      - **Basics:** Retrieve the company’s market cap and sector classification.
+      - **Filings:** Pull the latest ESG filings directly from HKEx.
+      - **Grading:** Use AI to create and review historical IAQ disclosure quality reports.
+      - **Contacts:** Find up-to-date Investor Relations contact information.
+      - **Outreach:** Automatically draft a professional email to engage the company.
+    ---
+    **⚙️ Other Tools**
+    - **Bulk Updates:** Refresh market data, ESG filings, and IR contacts for multiple companies at once.
+    - **Data Visualization:** Analyze historical grade trends across your watchlist with an interactive chart.
+    - **Data Export:** Download all your tracked data to a single Excel file for reporting.
+    """)
+
 st.divider()
 
 
 # ---------------------------------- Control --------------------------------- #
-st.subheader("Dashboard")
-st.write(
-    """
-    This is your central dashboard. Add companies you want to monitor to the watchlist,
-    see their latest IAQ grade, and check when their data was last refreshed.
-    Toggle the 'Edit Mode' button to switch between Display and Edit Mode.
+st.subheader("📊 Dashboard")
+st.write("""
+    Your central watchlist of Hong Kong–listed companies.
+    Use this page to **view**, **filter**, and **manage** the companies you’re tracking for IAQ disclosure updates.
+    """)
+with st.expander("Detailed Instructions"):
+    st.markdown("""
+    👀 View Mode (Default)
+    - **Open a Company Profile:** Click the **checkbox in the first column** beside a company's name to select it. The company’s detailed profile will appear below the dashboard.
+    - **Filter Your List:** Turn on **Add Filters** (above the table) to search or narrow companies by sector, market cap, or IAQ grade.
+    - **Sort Columns:** Click any column header — for example, *Market Cap* or *IAQ Grade* — to sort ascending or descending.
 
-    **Display Mode:** Your main view for browsing and selecting companies.
-    - **Select a company:** Select the checkbox next to the row to load its detailed profile in the next section.
-    - **Sort data:** Click on a column header to sort the table by that column.
-
-    **Edit Mode:** Your view for managing your watchlist.
-    - **Add a company:** Scroll to the bottom and fill the blank row at the bottom with a 5-digit stock code (e.g., 00005). The company name is optional and will be auto-populated when you fetch its ESG filings.
-    - **Edit a cell:** Double-click any cell to make changes, then press the `Enter` key or click away to confirm.
-    - **Delete a company:** Select the checkbox next to the row and press the `Delete` key.
-    - Click **"Save Changes"** below to apply all your edits to the database.
-    """
-)
+    ✏️ Manage Watchlist (Edit Mode)
+    - **Switch to Manage Mode:** Toggle **Manage Watchlist** at the top-left of the dashboard.
+      This lets you add or remove companies from your list.
+    - **Add a Company:** Scroll to the blank row at the bottom and enter a 5-digit stock code (e.g. `00005`). The company’s name, sector, and market data will fill in automatically.
+    - **Update Info:** Click a cell to edit its value, then press *Enter* key or click away to confirm.
+    - **Remove a Company:** Tick the checkbox next to a company, then press **Delete** key.
+    - **Save Your Watchlist:** Click **Save Watchlist** when finished to apply your changes. *Your updates won’t be stored until you save.*
+    """)
 
 # init control dataframe and edit_control
 if "control_df" not in st.session_state:
@@ -1415,16 +1679,40 @@ if "control_toggle" not in st.session_state:
     st.session_state.control_toggle = False
 
 # display edit control toggle
-edit_control = st.toggle("Edit Mode", key="control_toggle")
+edit_control = st.toggle("Manage Watchlist", key="control_toggle")
 
 # show dataframe in display mode
+control_col_order = [
+    "stock_code",
+    "name",
+    "sector",
+    "market_cap",
+    "iaq_grade",
+    "last_updated_filings_at",
+    "last_updated_grade_at",
+    "last_updated_contacts_at",
+]
+
 if not edit_control:
     # user to select a stock code
     selected_row = st.dataframe(
-        st.session_state.control_df,
+        filter_dataframe(st.session_state.control_df),
         use_container_width=True,
         hide_index=True,
-        column_config={"id": None},
+        column_order=control_col_order,
+        column_config={
+            "id": None,
+            "market_cap": st.column_config.NumberColumn("market_cap (HK$bn)"),
+            "last_updated_filings_at": st.column_config.DatetimeColumn(
+                format="YYYY-MM-DD"
+            ),
+            "last_updated_grade_at": st.column_config.DatetimeColumn(
+                format="YYYY-MM-DD"
+            ),
+            "last_updated_contacts_at": st.column_config.DatetimeColumn(
+                format="YYYY-MM-DD"
+            ),
+        },
         on_select="rerun",
         selection_mode="single-row",
     )
@@ -1437,10 +1725,14 @@ if not edit_control:
 
 # show data editor in edit mode
 else:
+    st.caption("""
+        ✏️ **Manage Watchlist** mode: You can add, edit, or delete companies. Click **Save Watchlist** when done.
+        """)
     st.data_editor(
         st.session_state.control_df,
         use_container_width=True,
         hide_index=True,
+        column_order=control_col_order,
         column_config={
             "id": None,
             "stock_code": st.column_config.TextColumn(
@@ -1458,15 +1750,15 @@ else:
         key="control_key",
         num_rows="dynamic",
     )
-    done_edit = st.button("Save Changes", type="primary", on_click=edit_control_df)
+    done_edit = st.button("Save Watchlist", type="primary", on_click=edit_control_df)
 
 st.divider()
 
 
 # # ------------------------------ Company Profile ----------------------------- #
 if "selected_stock_code" not in st.session_state:
-    st.subheader("Company Profile")
-    st.info("Select a stock code from dashboard to view its details.")
+    st.subheader("🏢 Company Profile")
+    st.info("Select a stock code from *Dashboard* to view its details.")
 else:
     # init session state variables if changes in selected stock code
     if ("prev_selected_stock_code" not in st.session_state) or (
@@ -1498,12 +1790,47 @@ else:
         st.subheader(f"Company Profile: {st.session_state.selected_stock_code}")
 
     # init navigation bar
-    tab_lst = ["ESG Filings", "IAQ Grading", "IR Contacts", "Outreach Email"]
+    tab_lst = ["Basics", "Filings", "Grading", "Contacts", "Outreach"]
     active_tab = st.radio("", tab_lst, horizontal=True, key="active_tab")
-    # Tab 1: ESG Filings
+
+    # Tab 1: Basics
     if active_tab == tab_lst[0]:
         st.write(
-            "Review the official ESG reports and announcements for this company, fetched directly from HKEx and sorted by the most recent date."
+            """
+            This data is automatically fetched from HKEx when a stock code is first added.
+            Click the button below to refresh the company's name, sector, and market capitalization.
+            """
+        )
+
+        # Fetch the row for the selected stock code from control_df
+        data = st.session_state.control_df[
+            st.session_state.control_df["stock_code"]
+            == st.session_state.selected_stock_code
+        ].iloc[0]
+
+        st.metric("HSICS Sector", data.get("sector", "N/A"))
+        col1, col2 = st.columns(2)
+        col1.metric("Market Cap (HK$bn)", f"{data.get('market_cap', 0):,.2f}")
+        col2.metric(
+            "Last Updated",
+            data.get("last_updated_market_cap_at", pd.NaT).strftime("%Y-%m-%d")
+            if pd.notna(data.get("last_updated_market_cap_at"))
+            else "N/A",
+        )
+
+        st.button(
+            "Refresh Basics",
+            type="primary",
+            on_click=update_basics,
+            kwargs={
+                "stock_codes": [st.session_state.selected_stock_code],
+            },
+        )
+
+    # Tab 2: ESG Filings
+    elif active_tab == tab_lst[1]:
+        st.write(
+            "Review official ESG reports from HKEx, sorted by the most recent date. Use the 'Refresh' button to fetch the latest filings."
         )
 
         if st.session_state.esg_filings_df.empty:
@@ -1524,14 +1851,17 @@ else:
             if "esg_filings_toggle" not in st.session_state:
                 st.session_state.esg_filings_toggle = False
             # display edit esg_filings toggle
-            edit_esg_filings = st.toggle("Edit Mode", key="esg_filings_toggle")
+            edit_esg_filings = st.toggle("Manage Filings", key="esg_filings_toggle")
 
             if not edit_esg_filings:
                 st.dataframe(
                     st.session_state.esg_filings_df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"id": None},
+                    column_config={
+                        "id": None,
+                        "url": st.column_config.LinkColumn(display_text="Open Link"),
+                    },
                 )
                 st.button(
                     "Refresh Filings",
@@ -1543,6 +1873,9 @@ else:
                     },
                 )
             else:
+                st.caption(
+                    "✏️ **Manage Filings** mode: You can now add, edit, or delete filings. Click 'Save Changes' when done."
+                )
                 st.data_editor(
                     st.session_state.esg_filings_df,
                     use_container_width=True,
@@ -1572,86 +1905,102 @@ else:
                 )
                 st.button("Save Changes", type="primary", on_click=edit_esg_filings_df)
 
-    # Tab 2: IAQ Grading
-    elif active_tab == tab_lst[1]:
-        st.write("""
-            Access the AI-generated report that grades the company's IAQ disclosure quality based on the filings in the previous tab.
+    # Tab 3: IAQ Grading
+    elif active_tab == tab_lst[2]:
+        st.write(
+            """
+            Access AI-generated reports on the company's IAQ disclosure quality. Each report is a **point-in-time snapshot** of their performance.
+            """
+        )
+        st.info(
+            """
+            ⭐ **Tip:** For the most accurate assessment, always refresh the ESG filings first and generate a new report whenever a new filing is published to track progress over time.
+            """
+        )
 
-            ⭐ **Tips:** For the most accurate assessment, refresh the filings first if they seem outdated.
-        """)
-
-        with st.expander("View Evaluation Criteria"):
-            st.markdown("""
-            The AI grades the company's IAQ disclosures based on the following criteria:
-            - **Length and Detail:** Short/vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
-            - **Key Performance Indicators (KPIs):** Presence of quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
-            - **Consistency:** How regularly KPIs are reported over time; improvements or expansions in disclosure (e.g., adding new metrics or deeper analysis in recent years).
-            - **Progression:** Emphasis on the last three years to assess if disclosure has improved.
-            """)
+        st.markdown("#### Historical Reports")
 
         if st.session_state.iaq_gradings_df.empty:
             st.info(
-                f"No IAQ grading report is currently stored for {st.session_state.selected_stock_code}. Generate one below!"
+                "No IAQ grading reports are currently stored for this company. You can generate one below."
             )
         else:
-            # Compile data
-            data = st.session_state.iaq_gradings_df.iloc[0]
+            st.write("Click on a report to expand its details and edit if needed.")
+            # Iterate through each historical report and create an expander for it
+            for index, report_data in st.session_state.iaq_gradings_df.iterrows():
+                grade_id = report_data["id"]
+                expander_title = f"Report from {report_data['grading_date'].strftime('%d %B %Y')}  |  Grade: {report_data.get('grade', 'N/A')}"
 
-            # Flag if report is outdated
-            if (
-                data.get("updated_at")
-                < st.session_state.esg_filings_df.iloc[0]["release_time"]
-            ):
-                st.info(
-                    "⚠️ Report Outdated: Newer ESG filings have been fetched since this IAQ report was generated. Regenerate the report to include the latest data in the analysis.",
-                )
+                with st.expander(expander_title):
+                    # Contextual "Outdated Report" warning INSIDE the relevant expander
+                    if not st.session_state.esg_filings_df.empty:
+                        latest_filing_date = st.session_state.esg_filings_df[
+                            "release_time"
+                        ].iloc[0]
+                        if report_data["grading_date"] < latest_filing_date:
+                            st.warning(
+                                "This report may be outdated as newer ESG filings have been published since it was created.",
+                                icon="⚠️",
+                            )
 
-            # Define keys based on selected stock code
-            with st.form("iaq_grading_form"):
-                st.text_input(
-                    "IAQ Grade",
-                    value=data.get("iaq_grade", ""),
-                    key=f"grade_{st.session_state.selected_stock_code}",
-                )
-                st.text_area(
-                    "Company Overview",
-                    value=data.get("overview", ""),
-                    height=150,
-                    key=f"overview_{st.session_state.selected_stock_code}",
-                )
-                st.text_area(
-                    "Justification",
-                    value=data.get("justification", ""),
-                    height=200,
-                    key=f"justification_{st.session_state.selected_stock_code}",
-                )
-                st.text_area(
-                    "Extracts",
-                    value=data.get("extracts", ""),
-                    height=400,
-                    key=f"extracts_{st.session_state.selected_stock_code}",
-                )
-                st.form_submit_button(
-                    "Save Changes",
-                    type="primary",
-                    on_click=edit_iaq_grading,
-                    kwargs={"stock_code": st.session_state.selected_stock_code},
-                )
+                    # The form for editing is neatly contained within the expander
+                    with st.form(f"iaq_grading_form_{grade_id}"):
+                        st.selectbox(
+                            "IAQ Grade",
+                            options=["Low", "Medium", "High"],
+                            index=["Low", "Medium", "High"].index(
+                                report_data.get("grade", "Low")
+                            ),
+                            key=f"grade_{grade_id}",
+                        )
+                        st.text_area(
+                            "Company Overview",
+                            value=report_data.get("overview", ""),
+                            height=100,
+                            key=f"overview_{grade_id}",
+                        )
+                        st.text_area(
+                            "Justification",
+                            value=report_data.get("justification", ""),
+                            height=150,
+                            key=f"justification_{grade_id}",
+                        )
+                        st.text_area(
+                            "Key Extracts",
+                            value=report_data.get("extracts", ""),
+                            height=200,
+                            key=f"extracts_{grade_id}",
+                        )
 
-        # Generate/Update IAQ Grading
-        st.button(
-            label="Generate Report"
-            if st.session_state.iaq_gradings_df.empty
-            else "Regenerate Report",
-            type="primary",
-            on_click=update_iaq_grading,
-            kwargs={
-                "stock_code": st.session_state.selected_stock_code,
-            },
-        )
+                        st.form_submit_button(
+                            "Save Changes",
+                            type="primary",
+                            on_click=edit_iaq_grading,
+                            kwargs={
+                                "grade_id": grade_id,
+                                "stock_code": st.session_state.selected_stock_code,
+                            },
+                        )
 
-    # Tab 3: IR Contacts
-    elif active_tab == "IR Contacts":
+        st.markdown("#### Generate New Report")
+        st.write("Create a new AI-powered assessment of the company's IAQ disclosures.")
+
+        # The evaluation criteria are now logically placed with the creation action
+        with st.expander("View Evaluation Criteria"):
+            st.markdown("""
+            The AI grades the company's IAQ disclosures based on the following criteria:
+            - **Length and Detail:** Short/vague mentions vs. dedicated sections with data.
+            - **Key Performance Indicators (KPIs):** Presence of quantifiable metrics.
+            - **Consistency:** How regularly KPIs are reported over time.
+            - **Progression:** Emphasis on improvements in recent years.
+            """)
+
+        if st.button("Generate Report", type="primary"):
+            update_iaq_grading(stock_code=st.session_state.selected_stock_code)
+            st.rerun()
+
+    # Tab 4: IR Contacts
+    elif active_tab == tab_lst[3]:
         st.write(
             "Find and manage the Investor Relations contact details needed for your outreach efforts."
         )
@@ -1672,7 +2021,7 @@ else:
             if "ir_contacts_toggle" not in st.session_state:
                 st.session_state.ir_contacts_toggle = False
             # display edit ir_contacts toggle
-            edit_ir_contacts = st.toggle("Edit Mode", key="ir_contacts_toggle")
+            edit_ir_contacts = st.toggle("Manage Contacts", key="ir_contacts_toggle")
 
             if not edit_ir_contacts:
                 st.dataframe(
@@ -1689,6 +2038,9 @@ else:
                     kwargs={"stock_codes": [st.session_state.selected_stock_code]},
                 )
             else:
+                st.caption(
+                    "✏️ **Manage Contacts** mode: You can now add, edit, or delete contacts. Click 'Save Changes' when done."
+                )
                 st.data_editor(
                     st.session_state.ir_contacts_df,
                     use_container_width=True,
@@ -1713,15 +2065,17 @@ else:
                 )
                 st.button("Save Changes", type="primary", on_click=edit_ir_contacts_df)
 
-    # Tab 4: Outreach Email
-    elif active_tab == "Outreach Email":
+    # Tab 5: Outreach Email
+    elif active_tab == tab_lst[4]:
         st.write(
             """
-        Draft a professional outreach email based on data from the previous tabs and
-        generate a .eml file. Use AI to autofill the content for a first draft.
-
-        ⭐ **Tips:** The email content is temporary and will not be saved. To keep a copy, please generate and download the email as a .eml file.
-        """
+            Draft a professional outreach email to the company's IR department. The AI will use the company's IAQ grade and contact details to create a personalized first draft.
+            """
+        )
+        st.info(
+            """
+            ⭐ **Tip:** The generated email is temporary, so remember to generate and download the `.eml` file to save a copy.
+            """
         )
 
         if "email_content" not in st.session_state:
@@ -1729,6 +2083,7 @@ else:
 
         # set up email form
         with st.form("email_form"):
+            st.markdown("##### Step 1: Confirm Recipients and Subject")
             st.text_input(
                 "To",
                 value=st.session_state.ir_contacts_df["email"]
@@ -1740,9 +2095,10 @@ else:
             )
             st.text_input(
                 "Subject",
-                value=f"Enhancing ESG Disclosures on Indoor Air Quality: A Partnership Opportunity with {st.secrets.NGO_NAME}",
+                value="Opportunities to Enhance and Showcase Your Leadership in IAQ",
                 key="email_subject",
             )
+            st.markdown("##### Step 2: Generate and Refine Email Body")
             st.text_area(
                 "Content",
                 key="email_content",
@@ -1751,14 +2107,14 @@ else:
             col1, col2, _ = st.columns([0.25, 0.25, 0.5])
             with col1:
                 st.form_submit_button(
-                    "Autofill Content",
+                    "Draft with AI",
                     type="secondary",
                     on_click=draft_email,
                     use_container_width=True,
                 )
             with col2:
                 submitted = st.form_submit_button(
-                    "Generate Email", type="primary", use_container_width=True
+                    "Generate .eml File", type="primary", use_container_width=True
                 )
             if submitted:
                 st.session_state.email = generate_email()
@@ -1772,7 +2128,7 @@ else:
                 st.success("Email generated! Ready for download.")
         if "email" in st.session_state:
             st.download_button(
-                label="Download Email",
+                label="Download .eml File",
                 data=st.session_state.email,
                 file_name=st.session_state.email_filename,
                 mime="message/rfc822",
@@ -1783,7 +2139,7 @@ st.divider()
 
 
 # ------------------------------- Bulk Updates ------------------------------- #
-st.subheader("Bulk Updates")
+st.subheader("⚡ Bulk Updates")
 st.write(
     """
     Save time by refreshing ESG filings and IR contacts for multiple companies at once.
@@ -1799,8 +2155,22 @@ with st.form("bulk_update_form"):
         value=12,
     )
 
-    col1, col2, _ = st.columns([0.25, 0.25, 0.5])
+    col1, col2, col3, _ = st.columns([0.25, 0.25, 0.25, 0.25])
+
     with col1:
+        st.form_submit_button(
+            "Fetch Basics",
+            type="primary",
+            on_click=update_basics,
+            kwargs={
+                "stock_codes": get_stock_codes_tbu(
+                    update_market_cap=True,
+                    update_before=datetime.now(pytz.UTC) - timedelta(weeks=int(weeks)),
+                )
+            },
+            use_container_width=True,
+        )
+    with col2:
         st.form_submit_button(
             "Fetch Filings",
             type="primary",
@@ -1813,7 +2183,7 @@ with st.form("bulk_update_form"):
             },
             use_container_width=True,
         )
-    with col2:
+    with col3:
         st.form_submit_button(
             "Fetch Contacts",
             type="primary",
@@ -1830,17 +2200,52 @@ with st.form("bulk_update_form"):
 st.divider()
 
 
-# --------------------------------- Download --------------------------------- #
-st.subheader("Data Export")
+# ---------------------------- Data Visualization ---------------------------- #
+st.subheader("🎨 Data Visualization")
 st.write(
     """
-    Download your entire dataset to a single Excel file.
-    This includes your dashboard watchlist, all collected ESG filings, IAQ gradings,
-    IR contacts, and the AI interaction (LLM) logs.
+    Analyze the historical IAQ grade distribution across your entire watchlist.
+    This helps you track overall progress year by year.
     """
 )
 
-if st.button("Generate Excel", type="primary"):
+# Prepare data and get available years
+chart_df = prepare_chart_data()
+if not chart_df.empty:
+    available_years = chart_df.index.unique().tolist()
+
+    # Add a multiselect to filter by year
+    selected_years = st.multiselect(
+        "Filter by Year:", options=available_years, default=available_years
+    )
+
+    if selected_years:
+        filtered_chart_df = chart_df[chart_df.index.isin(selected_years)]
+
+        # Use columns for a side-by-side view of the chart and data
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.markdown("#### Grade Distribution Over Time")
+            st.bar_chart(filtered_chart_df)
+        with col2:
+            st.markdown("#### Grade Summary")
+            st.dataframe(filtered_chart_df, use_container_width=True)
+    else:
+        st.info("Please select at least one year to display trends.")
+
+st.divider()
+
+
+# --------------------------------- Download --------------------------------- #
+st.subheader("📥 Data Export")
+st.write(
+    """
+    Download your entire dataset to a single Excel file.
+    Export includes your full dataset (companies, filings, IAQ grades, contacts, and AI logs) in Excel format.
+    """
+)
+
+if st.button("Generate .xlsx File", type="primary"):
     excel_output = write_to_excel()
     st.session_state.excel_data = excel_output.getvalue()
     st.session_state.excel_filename = f"""ListCo IAQ tracker__{
@@ -1854,7 +2259,7 @@ if st.button("Generate Excel", type="primary"):
 
 if "excel_data" in st.session_state:
     st.download_button(
-        label="Download Excel",
+        label="Download .xlsx File",
         data=st.session_state.excel_data,
         file_name=st.session_state.excel_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
