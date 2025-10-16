@@ -134,6 +134,7 @@ def get_stock_codes_tbu(
     *,
     update_market_cap: bool = False,
     update_filings: bool = False,
+    update_grades: bool = False,
     update_contacts: bool = False,
     update_before: datetime | None = None,
 ) -> list[str]:
@@ -142,8 +143,8 @@ def get_stock_codes_tbu(
     Optional: set update_before to get stock codes updated before a specific date
     """
     # Validate inputs
-    if not (update_market_cap or update_filings or update_contacts):
-        msg = "At least one of update_market_cap, update_filings, or update_contacts must be True"
+    if not (update_market_cap or update_filings or update_grades or update_contacts):
+        msg = "At least one of update_market_cap, update_filings, update_grades, or update_contacts must be True"
         raise ValueError(msg)
 
     # Determine the field to filter
@@ -151,6 +152,8 @@ def get_stock_codes_tbu(
         field = "last_updated_market_cap_at"
     elif update_filings:
         field = "last_updated_filings_at"
+    elif update_grades:
+        field = "last_updated_grade_at"
     else:
         field = "last_updated_contacts_at"
 
@@ -650,11 +653,15 @@ def grade_iaq(
     # Get stock code, company name from control df
     company_name = get_company_name(stock_code=stock_code) or ""
 
-    # Get all filings from esg_filings df
-    condition = st.session_state.esg_filings_df["stock_code"] == stock_code
-    filings_df = st.session_state.esg_filings_df[condition][
-        ["title", "url", "release_time"]
-    ].sort_values(by="release_time", ascending=False)
+    # Get all filings from database
+    response = (
+        supabase.table("esg_filings")
+        .select("title, url, release_time")
+        .eq("stock_code", stock_code)
+        .order("release_time", desc=True)
+        .execute()
+    )
+    filings_df = pd.DataFrame(response.data)
 
     # Raise if no filings found
     if filings_df.empty:
@@ -663,8 +670,8 @@ def grade_iaq(
     # Init list to store responses
     responses = ""
 
-    # Chunk data and process in batches of 10
-    chunk_size = 10
+    # Chunk data and process in batches of 6
+    chunk_size = 6
     for i in range(0, len(filings_df), chunk_size):
         chunk_df = filings_df.iloc[i : i + chunk_size]
         filings = "\n".join(
@@ -672,15 +679,15 @@ def grade_iaq(
         )
 
         # Create prompt
-        prompt = f"""You are an expert ESG analyst specializing in evaluating corporate disclosures for Hong Kong listed companies under the Hong Kong Stock Exchange (HKEX) ESG reporting guidelines.
+        prompt = f"""You are an expert ESG analyst specializing in evaluating corporate disclosures based on Hong Kong Stock Exchange (HKEX) ESG reporting guidelines.
         Your task is to evaluate the ESG disclosures of the company {company_name} with a stock ticker of '{stock_code}' specifically on the topic of indoor air quality (IAQ). This includes any mentions of IAQ management, monitoring, policies, risks, mitigation strategies, emissions (e.g., VOCs, PM2.5, CO2 levels), ventilation systems, employee health impacts, building certifications (e.g., BEAM Plus, LEED), or related initiatives in its operation.
-        You are provided with below list of URLs to all of the company's ESG filings published onHKEx. Read content from these URLs, then extract and summarize only the sections relevant to indoor air quality.
+        Below are list of URLs to all of the company's ESG filings published on HKEx. Browse these URLs, then extract and summarize only the sections relevant to indoor air quality.
         {filings}
         Evaluation Criteria:
         Focus solely on indoor air quality disclosures. Grade based on:
 
-        # Length and Detail: Short/vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
-        # Key Performance Indicators (KPIs): Presence of quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
+        # Length and Detail: Vague mentions (e.g., one sentence) vs. dedicated sections with explanations, data, and examples.
+        # Key Performance Indicators (KPIs): Quantifiable metrics (e.g., IAQ monitoring results, reduction targets for pollutants, compliance rates with standards like Hong Kong IAQ Objectives).
         # Consistency: How regularly KPIs are reported over time; improvements or expansions in disclosure (e.g., adding new metrics or deeper analysis in recent years).
         # Progression: Emphasis on the last three years to assess if disclosure has improved.
 
@@ -1049,7 +1056,9 @@ def load_control_df():
     """
     Load ir_contacts table from database to session state
     """
-    response = supabase.table("control").select("*").order("market_cap", desc=True).execute()
+    response = (
+        supabase.table("control").select("*").order("market_cap", desc=True).execute()
+    )
     df = pd.DataFrame(response.data)
 
     # convert datetime fields
@@ -1382,7 +1391,7 @@ def edit_iaq_grading(
     st.success("Changes to the grading report have been saved.")
 
 
-def update_iaq_grading(
+def generate_iaq_grading(
     stock_code: str,
 ):
     """
@@ -1413,12 +1422,27 @@ def update_iaq_grading(
             st.warning(msg, icon="⚠️")
         else:
             st.warning(exc, icon="⚠️")
+    except genai.errors.ServerError:
+        st.warning(
+            "The AI service is currently unavailable due to a server error. Please try again in a few moments.",
+            icon="⚠️",
+        )
     else:
         st.success(f"IAQ grading report successfully generated for {stock_code}!")
 
     # Reset session state
     load_control_df()
     st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+
+
+def generate_iaq_gradings(
+    stock_codes: list[str],
+):
+    """
+    Bulk generate IAQ grading reports
+    """
+    for code in stock_codes:
+        generate_iaq_grading(stock_code=code)
 
 
 # -------------------------------- IR Contacts ------------------------------- #
@@ -1820,7 +1844,9 @@ else:
             if pd.notna(data.get("last_updated_market_cap_at"))
             else "N/A",
         )
-        st.caption("Note: HKEx calculates market cap based on HKEx-listed shares only which may not reflect the company's total global market capitalization (e.g., for H-shares, Depositary Receipts (DRs), or dual-listed companies).")
+        st.caption(
+            "Note: HKEx calculates market cap based on HKEx-listed shares only which may not reflect the company's total global market capitalization (e.g., for H-shares, Depositary Receipts (DRs), or dual-listed companies)."
+        )
 
         st.button(
             "Refresh Basics",
@@ -2000,7 +2026,7 @@ else:
             """)
 
         if st.button("Generate Report", type="primary"):
-            update_iaq_grading(stock_code=st.session_state.selected_stock_code)
+            generate_iaq_grading(stock_code=st.session_state.selected_stock_code)
             st.rerun()
 
     # Tab 4: IR Contacts
@@ -2156,10 +2182,10 @@ with st.form("bulk_update_form"):
     weeks = st.number_input(
         label=("Refresh data for companies not updated in the last (weeks):"),
         min_value=0,
-        value=12,
+        value=52,
     )
 
-    col1, col2, col3, _ = st.columns([0.25, 0.25, 0.25, 0.25])
+    col1, col2, col3, col4 = st.columns([0.25, 0.25, 0.25, 0.25])
 
     with col1:
         st.form_submit_button(
@@ -2188,6 +2214,19 @@ with st.form("bulk_update_form"):
             use_container_width=True,
         )
     with col3:
+        st.form_submit_button(
+            "Generate Reports",
+            type="primary",
+            on_click=generate_iaq_gradings,
+            kwargs={
+                "stock_codes": get_stock_codes_tbu(
+                    update_grades=True,
+                    update_before=datetime.now(pytz.UTC) - timedelta(weeks=int(weeks)),
+                )
+            },
+            use_container_width=True,
+        )
+    with col4:
         st.form_submit_button(
             "Fetch Contacts",
             type="primary",
@@ -2237,7 +2276,9 @@ if not chart_df.empty:
     else:
         st.info("Please select at least one year to display trends.")
 else:
-    st.info("Not enough historical data to generate a trend chart. Start by generating some grading reports!")
+    st.info(
+        "Not enough historical data to generate a trend chart. Start by generating some grading reports!"
+    )
 
 st.divider()
 
