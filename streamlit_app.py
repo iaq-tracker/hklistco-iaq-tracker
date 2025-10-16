@@ -2236,6 +2236,8 @@ if not chart_df.empty:
             st.dataframe(filtered_chart_df, use_container_width=True)
     else:
         st.info("Please select at least one year to display trends.")
+else:
+    st.info("Not enough historical data to generate a trend chart. Start by generating some grading reports!")
 
 st.divider()
 
