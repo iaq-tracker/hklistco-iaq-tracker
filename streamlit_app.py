@@ -1420,13 +1420,9 @@ def generate_iaq_grading(
                 "This may be due to rate limits—please try again later."
             )
             st.warning(msg, icon="⚠️")
-        else:
-            st.warning(exc, icon="⚠️")
     except genai.errors.ServerError:
-        st.warning(
-            "The AI service is currently unavailable due to a server error. Please try again in a few moments.",
-            icon="⚠️",
-        )
+        msg = "The AI service is currently unavailable due to a server error. Please try again in a few moments."
+        st.warning(msg, icon="⚠️")
     else:
         st.success(f"IAQ grading report successfully generated for {stock_code}!")
 
