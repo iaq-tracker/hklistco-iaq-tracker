@@ -2,14 +2,22 @@ name: Wake Streamlit App
 
 on:
   schedule:
-    # Run at 0 and 12 UTC
+    # Run at 0:00 and 12:00 UTC daily (adjust cron as needed for your timezone)
     - cron: '0 0,12 * * *'
-  workflow_dispatch:  # allow manual run
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
-  ping:
+  wake:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for pushing commits
     steps:
-      - name: Wake up Streamlit app
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create empty commit and push
         run: |
-          curl -s -o /dev/null -w "%{http_code}\n" https://iaq-tracker.streamlit.app
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git commit --allow-empty -m "Automated wake-up commit"
+          git push origin main  # Replace 'main' with your default branch if different
