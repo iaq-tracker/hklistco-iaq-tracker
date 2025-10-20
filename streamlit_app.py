@@ -1412,6 +1412,7 @@ def generate_iaq_grading(
     except ValueError as exc:
         if "No filings found in database for" in str(exc):
             msg = "No filings found in database. Please fetch filings first."
+            print(msg)
             st.warning(msg, icon="⚠️")
         elif "Null value in response text." in str(exc):
             msg = (
@@ -1419,9 +1420,11 @@ def generate_iaq_grading(
                 f"disclosures for {stock_code}. "
                 "This may be due to rate limits—please try again later."
             )
+            print(msg)
             st.warning(msg, icon="⚠️")
     except genai.errors.ServerError:
         msg = "The AI service is currently unavailable due to a server error. Please try again in a few moments."
+        print(msg)
         st.warning(msg, icon="⚠️")
     else:
         st.success(f"IAQ grading report successfully generated for {stock_code}!")
