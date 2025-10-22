@@ -2,22 +2,38 @@ name: Wake Streamlit App
 
 on:
   schedule:
-    # Run at 0:00 and 12:00 UTC daily (adjust cron as needed for your timezone)
-    - cron: '0 0,12 * * *'
-  workflow_dispatch:  # Allows manual triggering
+    # Runs every 3 hours (0, 3, 6, 9, 12, 15, 18, 21 UTC)
+    - cron: '0 */3 * * *'
+  workflow_dispatch:  # allow manual trigger
 
 jobs:
   wake:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # Required for pushing commits
+    timeout-minutes: 10
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create empty commit and push
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Visit Streamlit app
         run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-          git commit --allow-empty -m "Automated wake-up commit"
-          git push origin main  # Replace 'main' with your default branch if different
+          node -e "
+            const { chromium } = require('playwright');
+            (async () => {
+              const browser = await chromium.launch({ headless: true });
+              const page = await browser.newPage();
+              console.log('Visiting Streamlit app...');
+              await page.goto('https://iaq-tracker.streamlit.app/', { waitUntil: 'networkidle' });
+              await page.waitForTimeout(7000); // wait for app frontend JS to trigger backend wake
+              console.log('✅ App visited successfully.');
+              await browser.close();
+            })();
+          "
