@@ -299,7 +299,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                     f"Substring or regex in {column}",
                 )
                 if user_text_input:
-                    df = df[df[column].astype(str).str.contains(user_text_input)]
+                    df = df[df[column].astype(str).str.contains(user_text_input, case=False, na=False)]
     return df
 
 
@@ -339,23 +339,7 @@ def get_company_basics(
     """
     Extract market cap
     """
-    # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    options = Options()
-    options.add_argument("--window-size=1920,1080")  # set window size
-    options.add_argument("--headless")  # headless mode
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gcm")  # disable GCM registration
-    options.add_argument("--disable-notifications")  # disable push notification
-    options.add_experimental_option(
-        "prefs",
-        {
-            "profile.default_content_setting_values.notifications": 2  # Block notifications
-        },
-    )
-    driver = webdriver.Chrome(service=service, options=options)
+    driver = init_chromedriver()
 
     # ---------- Step 2: visit "Listed Company Information Title Search" --------- #
     url = st.secrets.BASICS_URL.format(int(stock_code))
@@ -406,6 +390,113 @@ def get_company_basics(
 
 
 # -------------------------------- ESG Filings ------------------------------- #
+def init_chromedriver() -> webdriver.Chrome:
+    '''Initialize chromedriver'''
+    # service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    service = Service(ChromeDriverManager().install())
+    options = Options()
+    options.add_argument("--window-size=1920,1080")  # set window size
+    options.add_argument("--headless")  # headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gcm")  # disable GCM registration
+    options.add_argument("--disable-notifications")  # disable push notification
+    options.add_experimental_option(
+        "prefs",
+        {
+            "profile.default_content_setting_values.notifications": 2  # Block notifications
+        },
+    )
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
+
+def edit_listco_info_title_search(
+    driver: webdriver.Chrome,
+    stock_code: str,
+    esg_filings_only: bool = False,
+) -> None:
+    url = st.secrets.FILINGS_URL
+    driver.get(url)
+
+    # a) enter Stock Code
+    stock_input = driver.find_element(By.ID, "searchStockCode")
+    stock_input.clear()
+    stock_input.send_keys(stock_code)
+    # wait till autocomplete suggestion for stock code appears
+    # NOTE: visibility_of_element_located ensures element is present and visible for clicking
+    autocomplete_suggestion = WebDriverWait(driver, 5).until(
+        EC.visibility_of_element_located(
+            (
+                By.CSS_SELECTOR,
+                "#autocomplete-list-0 table tr.autocomplete-suggestion.narrow",
+            )
+        )
+    )
+    if autocomplete_suggestion.text == "View More":
+        msg = "Please check your stock code and retry, as there is no autocomplete suggestion."
+        raise ValueError(msg)
+    # click on autocomplete suggestion
+    autocomplete_suggestion.click()
+
+    # b) choose Headline Category
+    # click on "ALL" under Search Type
+    search_type__all = WebDriverWait(driver, 5).until(
+        EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "a.combobox-field[data-value='rbAll']")
+        )
+    )
+    search_type__all.click()
+    # click on "Headline Category" under Search Type
+    search_type__headline = WebDriverWait(driver, 5).until(
+        EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "div.droplist-item[data-value='rbAfter2006']")
+        )
+    )
+    search_type__headline.click()
+
+    # c) choose Document Type
+    # click on "ALL" under Document Type
+    doc_type__all = WebDriverWait(driver, 5).until(
+        EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "#rbAfter2006 a.combobox-field[data-value='-2']")
+        )
+    )
+    doc_type__all.click()
+    # click on "Financial Statements/ESG Information" under Document Type
+    doc_type__esg = WebDriverWait(driver, 5).until(
+        EC.visibility_of_element_located(
+            (By.CSS_SELECTOR, "#rbAfter2006 ul li[data-value='40000']")
+        )
+    )
+    driver.execute_script("arguments[0].scrollIntoView(true);", doc_type__esg)
+    doc_type__esg.click()
+    # click on "ESG Info/Report" or "ALL"
+    data_value = "40400" if esg_filings_only else "-2"
+    doc_type__esg_all = WebDriverWait(driver, 5).until(
+        EC.visibility_of_element_located(
+            (
+                By.CSS_SELECTOR,
+                f"#rbAfter2006 ul li[data-value='40000'] ul li[data-value='{data_value}']",
+            )
+        )
+    )
+    doc_type__esg_all.click()
+
+    # d) search result
+    search = driver.find_element(
+        By.CSS_SELECTOR, "div.filter__buttonGroup a[class^=filter__btn-applyFilters-js]"
+    )
+    search.click()
+
+    # e) wait till results table appears
+    time.sleep(2)
+    WebDriverWait(driver, 5).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "#titleSearchResultPanel"))
+    )
+
+
 def get_last_updated_filings_at(stock_code: str) -> datetime | None:
     """
     Get the timestamp of last updated at for a stock code.
@@ -470,106 +561,24 @@ def scrape(
     """
     Scrape HKEx website and extract key filings.
     """
-    # ----------------------- Step 1 - set up chromedriver ----------------------- #
-    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    options = Options()
-    options.add_argument("--window-size=1920,1080")  # set window size
-    options.add_argument("--headless")  # headless mode
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gcm")  # disable GCM registration
-    options.add_argument("--disable-notifications")  # disable push notification
-    options.add_experimental_option(
-        "prefs",
-        {
-            "profile.default_content_setting_values.notifications": 2  # Block notifications
-        },
-    )
-    driver = webdriver.Chrome(service=service, options=options)
+    driver = init_chromedriver()
 
-    # ---------- Step 2: visit "Listed Company Information Title Search" --------- #
-    url = st.secrets.FILINGS_URL
-    driver.get(url)
-
-    # a) enter Stock Code
-    stock_input = driver.find_element(By.ID, "searchStockCode")
-    stock_input.clear()
-    stock_input.send_keys(stock_code)
-    # wait till autocomplete suggestion for stock code appears
-    # NOTE: visibility_of_element_located ensures element is present and visible for clicking
-    autocomplete_suggestion = WebDriverWait(driver, 5).until(
-        EC.visibility_of_element_located(
-            (
-                By.CSS_SELECTOR,
-                "#autocomplete-list-0 table tr.autocomplete-suggestion.narrow",
-            )
+    # fetch ESG filings, or all filings if failed
+    for search_option in [True, False]:
+        edit_listco_info_title_search(
+            driver,
+            stock_code,
+            esg_filings_only=search_option,
         )
-    )
-    if autocomplete_suggestion.text == "View More":
-        msg = "Please check your stock code and retry, as there is no autocomplete suggestion."
-        raise ValueError(msg)
-    # click on autocomplete suggestion
-    autocomplete_suggestion.click()
-
-    # b) choose Headline Category
-    # click on "ALL" under Search Type
-    search_type__all = WebDriverWait(driver, 5).until(
-        EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "a.combobox-field[data-value='rbAll']")
+        result_rows = driver.find_elements(
+            By.CSS_SELECTOR,
+            "#titleSearchResultPanel table tbody tr",
         )
-    )
-    search_type__all.click()
-    # click on "Headline Category" under Search Type
-    search_type__headline = WebDriverWait(driver, 5).until(
-        EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "div.droplist-item[data-value='rbAfter2006']")
-        )
-    )
-    search_type__headline.click()
+        if result_rows:
+                break
 
-    # c) choose Document Type
-    # click on "ALL" under Document Type
-    doc_type__all = WebDriverWait(driver, 5).until(
-        EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "#rbAfter2006 a.combobox-field[data-value='-2']")
-        )
-    )
-    doc_type__all.click()
-    # click on "Financial Statements/ESG Information" under Document Type
-    doc_type__esg = WebDriverWait(driver, 5).until(
-        EC.visibility_of_element_located(
-            (By.CSS_SELECTOR, "#rbAfter2006 ul li[data-value='40000']")
-        )
-    )
-    driver.execute_script("arguments[0].scrollIntoView(true);", doc_type__esg)
-    doc_type__esg.click()
-    # then click on "ALL"
-    doc_type__esg_all = WebDriverWait(driver, 5).until(
-        EC.visibility_of_element_located(
-            (
-                By.CSS_SELECTOR,
-                "#rbAfter2006 ul li[data-value='40000'] ul li[data-value='40400']",
-            )
-        )
-    )
-    doc_type__esg_all.click()
-
-    # d) search result
-    search = driver.find_element(
-        By.CSS_SELECTOR, "div.filter__buttonGroup a[class^=filter__btn-applyFilters-js]"
-    )
-    search.click()
-
-    # ------------------ Step 3: loop through available reports ------------------ #
-    time.sleep(2)
-
-    # a) wait till results table appears
-    WebDriverWait(driver, 5).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "#titleSearchResultPanel"))
-    )
-
-    # b) load more records if i) there is no last_updated_at
+    # loop through available reports
+    # load more records if i) there is no last_updated_at
     # or ii) earliest_release_time is after last_updated_at
     last_updated_at = get_last_updated_filings_at(stock_code)
     while True:
@@ -671,8 +680,10 @@ def grade_iaq(
     responses = ""
 
     # Chunk data and process in batches of 6
-    chunk_size = 6
-    for i in range(0, len(filings_df), chunk_size):
+    chunk_size = 5
+    max_batches = 3
+
+    for i in range(0, len(filings_df), max_batches * chunk_size):
         chunk_df = filings_df.iloc[i : i + chunk_size]
         filings = "\n".join(
             [f"{row['title']}: {row['url']}" for _, row in chunk_df.iterrows()]
@@ -1943,7 +1954,7 @@ else:
         )
         st.info(
             """
-            ⭐ **Tip:** For the most accurate assessment, always refresh the ESG filings first and generate a new report whenever a new filing is published to track progress over time.
+            ⭐ **Tip:** For the most accurate assessment, always refresh ESG filings first. The AI will then generate a new report based on the **15 most recent filings** to track progress over time.
             """
         )
 
