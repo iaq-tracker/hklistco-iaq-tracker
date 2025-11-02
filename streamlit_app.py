@@ -679,7 +679,7 @@ def grade_iaq(
     # Init list to store responses
     responses = ""
 
-    # Chunk data and process in batches of 6
+    # Chunk data and process in batches of 5
     chunk_size = 5
     max_batches = 3
 
