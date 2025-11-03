@@ -1439,10 +1439,10 @@ def generate_iaq_grading(
         st.warning(msg, icon="⚠️")
     else:
         st.success(f"IAQ grading report successfully generated for {stock_code}!")
-
-    # Reset session state
-    load_control_df()
-    st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+        # Reset session state
+        load_control_df()
+        st.session_state.iaq_gradings_df = load_iaq_gradings(stock_code)
+        return True
 
 
 def generate_iaq_gradings(
@@ -2036,8 +2036,9 @@ else:
             """)
 
         if st.button("Generate Report", type="primary"):
-            generate_iaq_grading(stock_code=st.session_state.selected_stock_code)
-            st.rerun()
+            success = generate_iaq_grading(stock_code=st.session_state.selected_stock_code)
+            if success:
+                st.rerun()
 
     # Tab 4: IR Contacts
     elif active_tab == tab_lst[3]:
