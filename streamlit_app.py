@@ -679,9 +679,9 @@ def grade_iaq(
     # Init list to store responses
     responses = ""
 
-    # Chunk data and process in batches of 5
-    chunk_size = 5
-    max_batches = 3
+    # Chunk data and process in batches of 3
+    chunk_size = 3
+    max_batches = 5
 
     for i in range(0, len(filings_df), max_batches * chunk_size):
         chunk_df = filings_df.iloc[i : i + chunk_size]
