@@ -1659,7 +1659,7 @@ def write_to_excel():
 #                                     Main                                     #
 # ---------------------------------------------------------------------------- #
 st.set_page_config(page_title="HK ListCo IAQ Tracker", page_icon=":material/aq_indoor:")
-st.title(":material/aq_indoor: Hong Kong ListCo IAQ Tracker")
+st.title("Hong Kong ListCo IAQ Tracker")
 st.write(
     """
     Welcome to the **Hong Kong ListCo IAQ Tracker** — an AI-powered tool that helps you monitor how Hong Kong–listed companies disclose their **Indoor Air Quality (IAQ)** information.
