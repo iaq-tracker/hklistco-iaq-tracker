@@ -20,135 +20,45 @@ The tool leverages Google's Gemini models for analysis and content generation, a
 ## Tech Stack
 
 *   **Framework:** [Streamlit](https://streamlit.io/)
-*   **Authentication:** [streamlit-authenticator](https://github.com/mkhorasani/Streamlit-Authenticator) (v0.4.2)
 *   **Database:** [Supabase](https://supabase.io/) (PostgreSQL)
-*   **AI/LLM:** [Google Gemini API](https://ai.google.dev/) (2.5 Flash, 2.5 Flash-Lite)
+*   **AI/LLM:** [Google Gemini API](https://ai.google.dev/) (2.5 Pro, 2.5 Flash)
 *   **Web Scraping:** [Selenium](https://www.selenium.dev/) & [webdriver-manager](https://pypi.org/project/webdriver-manager/)
 *   **Data Handling:** [Pandas](https://pandas.pydata.org/)
-*   **Deployment:** [Hugging Face Spaces](https://huggingface.co/spaces)
-
-## Project Structure
-
-```
-streamlit_app.py        # Main Streamlit entry point (UI + orchestration)
-modules/
-  db.py                 # Database layer — Supabase CRUD and session-state helpers
-  llm.py                # LLM layer — Gemini calls for grading, contacts, email drafting
-  scraping.py           # Scraping layer — Selenium/HKEx for filings and company basics
-load_data.py            # One-time script to seed the master Excel into Supabase
-.github/
-  workflows/
-    keep-alive.yml      # Daily cron job to prevent Supabase/HF Space inactivity pauses
-.streamlit/
-  secrets.toml          # Local secrets (not committed — see setup below)
-packages.txt            # System packages for HF Spaces (Chromium)
-requirements.txt        # Python dependencies
-```
+*   **Deployment:** Streamlit Community Cloud
 
 ## Local Setup and Installation
+
+Follow these steps to run the application on your local machine.
 
 ### 1. Prerequisites
 
 *   Python 3.9+
 *   Git
-*   Google Chrome (for local Selenium scraping)
 
 ### 2. Clone the Repository
 
 ```bash
-git clone https://github.com/ernesthung/hklistco-iaq-tracker.git
-cd hklistco-iaq-tracker
+git clone https://github.com/ernesthung/hklistco-esg-tracker.git
+cd hklistco-esg-tracker
 ```
 
 ### 3. Install Dependencies
 
+It's recommended to use a virtual environment.
+
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
 
 pip install -r requirements.txt
 ```
 
 ### 4. Set Up Supabase
+See: https://docs.streamlit.io/develop/tutorials/databases/supabase
 
-Follow the [Streamlit + Supabase guide](https://docs.streamlit.io/develop/tutorials/databases/supabase) to create a project and get your URL and service key.
-
-### 5. Configure Secrets
-
-Create `.streamlit/secrets.toml` with the following structure:
-
-```toml
-GEMINI_API_KEYS = ["your-key-1", "your-key-2"]
-
-FILINGS_URL = "https://..."   # HKEx filing search URL
-BASICS_URL  = "https://..."   # HKEx company page URL
-
-NGO_URL       = "https://..."  # Your organisation's website
-NGO_NAME      = "Your Org"
-EMAIL_TEMPLATE = "..."         # Outreach email template
-
-[connections.supabase]
-SUPABASE_URL = "https://your-project.supabase.co"
-SUPABASE_KEY = "your-service-key"
-
-[auth]
-cookie_name    = "iaq_tracker_auth"
-cookie_key     = "some-random-secret"
-cookie_expiry_days = 30
-
-[auth.credentials.usernames.admin]
-email    = "admin@example.com"
-name     = "Admin"
-password = "plain-or-pre-hashed-password"
-```
-
-To pre-hash a password (recommended):
-
-```bash
-python -c "import streamlit_authenticator as s; print(s.Hasher(['YOUR_PASSWORD']).generate())"
-```
-
-### 6. Seed the Database (first run only)
-
-```bash
-python load_data.py
-```
-
-### 7. Run the Application
+### 5. Run the Application
+Once the setup is complete, run the following command in your terminal:
 
 ```bash
 streamlit run streamlit_app.py
-```
-
-## Deployment (Hugging Face Spaces)
-
-1. Create a new Space on Hugging Face (Streamlit SDK).
-2. Connect your GitHub repo in the HF Spaces UI — pushes to `main` trigger automatic redeploys.
-3. Add every key from `.streamlit/secrets.toml` as a **Space Secret** (they replace the file in production).
-4. `packages.txt` (installs Chromium) and `requirements.txt` are picked up automatically.
-
-### Keep-Alive Cron Job
-
-`.github/workflows/keep-alive.yml` runs daily at **6 am KST (9 pm UTC)** via GitHub Actions:
-
-- Pings Supabase to prevent the 7-day inactivity pause.
-- Optionally pings the HF Space URL to prevent the 48-hour inactivity sleep.
-
-Required **GitHub Actions secrets** (repo → Settings → Secrets and variables → Actions):
-
-| Secret | Purpose |
-|--------|---------|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Supabase service key |
-| `HF_SPACE_URL` | Your HF Space URL (set after deploying; leave unset to skip) |
-
-## Development
-
-```bash
-# Lint (pylint + ruff via pre-commit)
-pre-commit run --all-files
-
-# Ruff only
-ruff check . --fix
-ruff format .
 ```
