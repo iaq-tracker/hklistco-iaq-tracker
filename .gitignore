@@ -170,5 +170,3 @@ cython_debug/
 # load data
 esg_filings.xlsx
 load_data.py
-
-CLAUDE.md
