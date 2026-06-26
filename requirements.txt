@@ -103,6 +103,7 @@ soupsieve==2.7
 SQLAlchemy==2.0.43
 storage3==0.12.1
 streamlit==1.48.1
+streamlit-authenticator==0.4.2
 StrEnum==0.4.15
 supabase==2.18.1
 supabase_auth==2.12.3
