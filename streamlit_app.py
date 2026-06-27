@@ -392,8 +392,8 @@ def get_company_basics(
 # -------------------------------- ESG Filings ------------------------------- #
 def init_chromedriver() -> webdriver.Chrome:
     '''Initialize chromedriver'''
-    # service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    service = Service(ChromeDriverManager().install())
+    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+    # service = Service(ChromeDriverManager().install())
     options = Options()
     options.add_argument("--window-size=1920,1080")  # set window size
     options.add_argument("--headless")  # headless mode
