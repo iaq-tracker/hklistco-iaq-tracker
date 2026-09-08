@@ -22,7 +22,7 @@ The tool leverages Google's Gemini models for analysis and content generation, a
 *   **Framework:** [Streamlit](https://streamlit.io/)
 *   **Database:** [Supabase](https://supabase.io/) (PostgreSQL)
 *   **AI/LLM:** [Google Gemini API](https://ai.google.dev/) (2.5 Pro, 2.5 Flash)
-*   **Web Scraping:** [Selenium](https://www.selenium.dev/) & [webdriver-manager](https://pypi.org/project/webdriver-manager/)
+*   **Web Scraping:** [Selenium](https://www.selenium.dev/) with Selenium Manager
 *   **Data Handling:** [Pandas](https://pandas.pydata.org/)
 *   **Deployment:** Streamlit Community Cloud
 

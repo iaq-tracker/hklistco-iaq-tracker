@@ -29,16 +29,13 @@ import pytz
 import sqlalchemy.exc
 import streamlit as st
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.common.exceptions import NoSuchElementException
 from supabase import create_client
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
+from browser_setup import create_driver
 
 
 # -------------------------- CSS for Navigation Bar -------------------------- #
@@ -392,24 +389,7 @@ def get_company_basics(
 # -------------------------------- ESG Filings ------------------------------- #
 def init_chromedriver() -> webdriver.Chrome:
     '''Initialize chromedriver'''
-    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    # service = Service(ChromeDriverManager().install())
-    options = Options()
-    options.add_argument("--window-size=1920,1080")  # set window size
-    options.add_argument("--headless")  # headless mode
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gcm")  # disable GCM registration
-    options.add_argument("--disable-notifications")  # disable push notification
-    options.add_experimental_option(
-        "prefs",
-        {
-            "profile.default_content_setting_values.notifications": 2  # Block notifications
-        },
-    )
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+    return create_driver()
 
 
 def edit_listco_info_title_search(

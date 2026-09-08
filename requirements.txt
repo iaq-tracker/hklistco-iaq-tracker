@@ -120,7 +120,6 @@ typing_extensions==4.14.1
 tzdata==2025.2
 urllib3==2.5.0
 watchdog==6.0.0
-webdriver-manager==4.0.2
 websocket-client==1.8.0
 websockets==15.0.1
 wheel==0.45.1
